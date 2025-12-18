@@ -2,9 +2,10 @@ using System;
 using System.IO;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
+using System.Reflection; // BindingFlags
 using System.Text.RegularExpressions;
 using System.Globalization; 
-using System.Reflection;
 using PdfSharp.Pdf;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf.IO;
@@ -44,6 +45,7 @@ namespace SmartDocProcessor.WPF.Services
             } catch { }
         }
 
+        // PDF가 Searchable(텍스트 포함)인지 확인
         public bool IsPdfSearchable(byte[] pdfBytes)
         {
             try
@@ -101,18 +103,17 @@ namespace SmartDocProcessor.WPF.Services
                     for (int i = 0; i < doc.PageCount; i++) {
                         var page = doc.Pages[i];
                         int pageNum = i + 1;
-                        // PDF 좌표계 변환을 위해 CropBox 높이 사용
-                        double pageHeight = page.CropBox.Height.Point > 0 ? page.CropBox.Height.Point : page.Height.Point;
+                        
+                        // [수정] .Point 제거 (이미 double 타입임)
+                        // CropBox 높이가 있으면 우선 사용, 없으면 전체 높이 사용
+                        double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height;
                         
                         if (page.Annotations != null) {
                             foreach (var item in page.Annotations) {
                                 if (item is PdfAnnotation annot) {
                                     var subType = annot.Elements.GetString("/Subtype");
                                     var rect = annot.Rectangle;
-                                    
-                                    // Y 좌표 변환 (Bottom-Up -> Top-Down)
                                     double appY = pageHeight - rect.Y2; 
-                                    
                                     var data = new AnnotationData { X=rect.X1, Y=appY, Width=rect.Width, Height=rect.Height, Page=pageNum, Content=annot.Contents ?? "" };
                                     
                                     if (subType == "/Highlight") { data.Type = "HIGHLIGHT_Y"; data.Color = "#FFFF00"; result.Add(data); }
@@ -138,7 +139,7 @@ namespace SmartDocProcessor.WPF.Services
                 var fontMatch = Regex.Match(da, @"([\d\.]+)\s+Tf");
                 if (fontMatch.Success && double.TryParse(fontMatch.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out double size)) 
                 {
-                    // PDF(72 DPI) -> WPF(96 DPI) 변환하여 로드
+                    // PDF(72 DPI) -> WPF(96 DPI) 변환
                     data.FontSize = (int)Math.Round(size * 96.0 / 72.0);
                 }
                 
@@ -148,6 +149,14 @@ namespace SmartDocProcessor.WPF.Services
                     double g = double.Parse(rgbMatch.Groups[2].Value, CultureInfo.InvariantCulture);
                     double b = double.Parse(rgbMatch.Groups[3].Value, CultureInfo.InvariantCulture);
                     data.Color = $"#FF{(int)(r*255):X2}{(int)(g*255):X2}{(int)(b*255):X2}";
+                }
+                else {
+                    var grayMatch = Regex.Match(da, @"([\d\.]+)\s+g");
+                    if (grayMatch.Success) {
+                        double v = double.Parse(grayMatch.Groups[1].Value, CultureInfo.InvariantCulture);
+                        int gray = (int)(v * 255);
+                        data.Color = $"#FF{gray:X2}{gray:X2}{gray:X2}";
+                    }
                 }
             } catch { }
         }
@@ -171,18 +180,15 @@ namespace SmartDocProcessor.WPF.Services
                     if (pageIdx < 0 || pageIdx >= doc.PageCount) continue;
                     var page = doc.Pages[pageIdx];
                     
-                    // [중요] 정확한 좌표 계산을 위해 CropBox 사용
-                    double pageHeight = page.CropBox.Height.Point > 0 ? page.CropBox.Height.Point : page.Height.Point;
-                    double pageXOffset = page.CropBox.X1.Point;
-                    double pageYOffset = page.CropBox.Y1.Point; // 보통 0이지만 확인 필요
+                    // [수정] .Point 제거. page.Height와 CropBox 속성들은 이미 double(Point 단위)임.
+                    double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height;
+                    double pageXOffset = page.CropBox.X1;
+                    double pageYOffset = page.CropBox.Y1;
 
                     foreach (var ann in group)
                     {
                         if (ann.Type == "OCR_TEXT") continue;
 
-                        // [중요] PDF 좌표계 (Bottom-Left 기준) 변환
-                        // WPF(Top-Left) -> PDF(Bottom-Left)
-                        // ann.Y는 위에서부터의 거리. PDF Y는 아래에서부터의 거리.
                         double pdfY = pageHeight - ann.Y - ann.Height + pageYOffset;
                         double pdfX = ann.X + pageXOffset;
 
@@ -205,8 +211,7 @@ namespace SmartDocProcessor.WPF.Services
 
                             double r = c.R / 255.0; double g = c.G / 255.0; double b = c.B / 255.0;
                             
-                            // [핵심] 폰트 크기 보정: WPF(96 DPI) -> PDF(72 DPI)
-                            // WPF에서 12px로 보였다면 PDF에서는 9pt여야 같은 물리적 크기가 됨
+                            // 폰트 크기 보정: WPF(96 DPI) -> PDF(72 DPI)
                             double pdfFontSize = ann.FontSize * 72.0 / 96.0;
 
                             annot.Elements["/DA"] = new PdfString($"/Helv {pdfFontSize:0.##} Tf {r.ToString("0.###", CultureInfo.InvariantCulture)} {g.ToString("0.###", CultureInfo.InvariantCulture)} {b.ToString("0.###", CultureInfo.InvariantCulture)} rg");
@@ -217,12 +222,10 @@ namespace SmartDocProcessor.WPF.Services
                             using (var gfx = XGraphics.FromForm(form))
                             {
                                 var options = new XPdfFontOptions(PdfFontEncoding.Unicode);
-                                // 여기서도 보정된 폰트 크기 사용
                                 var font = CreateSafeFont(ann.FontFamily, Math.Max(pdfFontSize, 4), ann.IsBold ? XFontStyleEx.Bold : XFontStyleEx.Regular, options);
                                 var brush = new XSolidBrush(c);
                                 var tf = new XTextFormatter(gfx);
                                 tf.Alignment = XParagraphAlignment.Left;
-                                // DrawString을 그릴 때 여백 없이 그림 (WPF TextBox Padding=0과 일치시키기 위해)
                                 tf.DrawString(ann.Content, font, brush, formRect, XStringFormats.TopLeft);
                             }
                             var apDict = new PdfDictionary(doc);
@@ -245,7 +248,6 @@ namespace SmartDocProcessor.WPF.Services
                                 annot.Elements["/C"] = new PdfArray(doc, new PdfReal(1), new PdfReal(0), new PdfReal(0));
                             }
                             var qp = new PdfArray(doc);
-                            // PDF QuadPoints는 Bottom-Left 기준
                             qp.Elements.Add(new PdfReal(rect.X1)); qp.Elements.Add(new PdfReal(rect.Y2)); 
                             qp.Elements.Add(new PdfReal(rect.X2)); qp.Elements.Add(new PdfReal(rect.Y2)); 
                             qp.Elements.Add(new PdfReal(rect.X1)); qp.Elements.Add(new PdfReal(rect.Y1)); 
