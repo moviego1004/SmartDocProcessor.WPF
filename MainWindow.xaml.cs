@@ -361,29 +361,24 @@ namespace SmartDocProcessor.WPF
                         Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(ann.Color)),
                         FontFamily = new FontFamily(ann.FontFamily),
                         FontWeight = ann.IsBold ? FontWeights.Bold : FontWeights.Normal,
-                        
                         Width = w, 
                         MinHeight = Math.Max(h, 20),
-                        
                         AcceptsReturn = true, 
                         TextWrapping = TextWrapping.Wrap,
                         Background = Brushes.Transparent, 
                         BorderThickness = new Thickness(0),
                         
-                        // [핵심] 패딩을 0으로 설정하여 PDF 저장 위치와 시각적 일치 유도
-                        Padding = new Thickness(0), 
-                        // 정렬을 상단으로 맞춤
-                        VerticalContentAlignment = VerticalAlignment.Top 
+                        // [핵심 수정] PDF 렌더링과 일치시키기 위해 패딩 제거 및 상단 정렬
+                        Padding = new Thickness(0),
+                        VerticalContentAlignment = VerticalAlignment.Top
                     };
                     
                     tb.TextChanged += (s, args) => { ann.Content = tb.Text; if (tb.ActualHeight > 0) ann.Height = tb.ActualHeight / RENDER_SCALE; };
                     tb.SizeChanged += (s, args) => { if (args.NewSize.Height > 0) ann.Height = args.NewSize.Height / RENDER_SCALE; };
                     tb.GotFocus += (s, args) => { SelectAnnotation(ann); };
                     if (ann == _selectedAnnotation) { tb.Loaded += (s, e) => { tb.Focus(); tb.CaretIndex = tb.Text.Length; }; }
-                    
                     element = tb;
                 }
-                // (이하 형광펜/도형 그리기 코드는 기존과 동일)
                 else 
                 {
                     var rect = new Rectangle
@@ -394,20 +389,17 @@ namespace SmartDocProcessor.WPF
                     };
                     rect.MouseLeftButtonDown += (s, e) => { e.Handled = true; SelectAnnotation(ann); }; rect.Cursor = Cursors.Hand; element = rect;
                 }
-                
-                // (Canvas 추가 로직 동일)
+
                 if (element != null)
                 {
                     Canvas.SetLeft(element, x); Canvas.SetTop(element, y);
-                    // ... (선택 핸들 로직 등)
                     if (ann == _selectedAnnotation)
                     {
-                        // ...
                         var border = new Rectangle { Width = Math.Max(w, element.ActualWidth) + 6, Height = Math.Max(h, element.ActualHeight) + 6, Stroke = Brushes.Blue, StrokeThickness = 1, StrokeDashArray = new DoubleCollection { 2 }, Fill = Brushes.Transparent, Cursor = Cursors.SizeAll };
                         Canvas.SetLeft(border, x - 3); Canvas.SetTop(border, y - 3);
                         border.MouseLeftButtonDown += (s, e) => { e.Handled = true; SelectAnnotation(ann); _isDraggingAnnot = true; _dragStartPoint = e.GetPosition(canvas); _annotStartPos = new Point(ann.X, ann.Y); _currentDrawingCanvas = canvas; canvas.CaptureMouse(); };
                         canvas.Children.Add(border); 
-                        
+
                         if (ann.Type == "TEXT") {
                             var handle = new Rectangle { Width = 10, Height = 10, Fill = Brushes.Red, Cursor = Cursors.SizeNWSE };
                             double actualW = Math.Max(w, element.ActualWidth); double actualH = Math.Max(h, element.ActualHeight);
