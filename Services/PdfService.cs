@@ -45,7 +45,6 @@ namespace SmartDocProcessor.WPF.Services
             } catch { }
         }
 
-        // PDF가 Searchable(텍스트 포함)인지 확인
         public bool IsPdfSearchable(byte[] pdfBytes)
         {
             try {
@@ -94,10 +93,10 @@ namespace SmartDocProcessor.WPF.Services
                         var page = doc.Pages[i];
                         int pageNum = i + 1;
                         
-                        // [수정] 좌표 계산 시 CropBox 오프셋 고려
+                        // [수정] Point 속성 제거 (이미 double 타입)
                         double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height;
-                        double yOffset = page.CropBox.Y1; // CropBox 시작 Y (Bottom)
-                        double xOffset = page.CropBox.X1; // CropBox 시작 X (Left)
+                        double yOffset = page.CropBox.Y1;
+                        double xOffset = page.CropBox.X1;
 
                         if (page.Annotations != null) {
                             foreach (var item in page.Annotations) {
@@ -105,8 +104,7 @@ namespace SmartDocProcessor.WPF.Services
                                     var subType = annot.Elements.GetString("/Subtype");
                                     var rect = annot.Rectangle;
                                     
-                                    // PDF(Bottom-Up) -> WPF(Top-Down) 변환
-                                    // VisualTop = (PageHeight + OffsetY) - Rect.Top
+                                    // 좌표 변환 (PDF Bottom-Up -> WPF Top-Down)
                                     double appY = (pageHeight + yOffset) - rect.Y2;
                                     double appX = rect.X1 - xOffset;
 
@@ -134,7 +132,7 @@ namespace SmartDocProcessor.WPF.Services
             try {
                 var fontMatch = Regex.Match(da, @"([\d\.]+)\s+Tf");
                 if (fontMatch.Success && double.TryParse(fontMatch.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out double size)) {
-                    // PDF(72 DPI) -> WPF(96 DPI) 복원
+                    // PDF(72) -> WPF(96) 복원
                     data.FontSize = (int)Math.Round(size * 96.0 / 72.0);
                 }
                 
@@ -167,13 +165,12 @@ namespace SmartDocProcessor.WPF.Services
                     if (pageIdx < 0 || pageIdx >= doc.PageCount) continue;
                     var page = doc.Pages[pageIdx];
                     
-                    // [중요] CropBox 기준 좌표 정보 가져오기
-                    // PDFSharp의 page.Height는 MediaBox 기준일 수 있으므로 CropBox를 우선함
+                    // [중요] CropBox 기준 좌표 계산 (Point 속성 제거)
                     double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height;
                     double xOffset = page.CropBox.X1;
                     double yOffset = page.CropBox.Y1;
 
-                    // 1. OCR 텍스트 (투명)
+                    // 1. OCR 텍스트 (투명 저장)
                     var ocrItems = group.Where(a => a.Type == "OCR_TEXT");
                     if (ocrItems.Any())
                     {
@@ -181,9 +178,8 @@ namespace SmartDocProcessor.WPF.Services
                         {
                             foreach (var ann in ocrItems)
                             {
-                                var brush = new XSolidBrush(XColor.FromArgb(1, 0, 0, 0)); // 완전 투명
+                                var brush = new XSolidBrush(XColor.FromArgb(1, 0, 0, 0)); // 투명
                                 var font = new XFont("Arial", ann.FontSize, XFontStyleEx.Regular);
-                                // OCR 좌표는 이미 PDF 좌표계와 일치한다고 가정하고 그대로 사용
                                 gfx.DrawString(ann.Content, font, brush, new XRect(ann.X, ann.Y, ann.Width, ann.Height), XStringFormats.TopLeft);
                             }
                         }
@@ -192,13 +188,12 @@ namespace SmartDocProcessor.WPF.Services
                     // 2. 사용자 주석
                     foreach (var ann in group.Where(a => a.Type != "OCR_TEXT"))
                     {
-                        // [핵심] 좌표 변환: WPF(Top-Down) -> PDF(Bottom-Up) + CropBox Offset
-                        // Rect.Bottom (Y1) = (PageHeight + OffsetY) - (WPF_Y + WPF_Height)
-                        double pdfY = (pageHeight + yOffset) - (ann.Y + ann.Height);
-                        double pdfX = xOffset + ann.X;
+                        // [핵심] 좌표 변환: WPF(Top-Down) -> PDF(Bottom-Up)
+                        double pdfTopY = (pageHeight + yOffset) - ann.Y;
+                        double pdfBottomY = pdfTopY - ann.Height;
+                        double pdfLeftX = xOffset + ann.X;
 
-                        // 명시적으로 Point 지정하여 사각형 생성 (좌하단, 우상단)
-                        var rect = new PdfRectangle(new XPoint(pdfX, pdfY), new XPoint(pdfX + ann.Width, pdfY + ann.Height));
+                        var rect = new PdfRectangle(new XPoint(pdfLeftX, pdfBottomY), new XPoint(pdfLeftX + ann.Width, pdfTopY));
 
                         if (ann.Type == "TEXT")
                         {
@@ -217,8 +212,8 @@ namespace SmartDocProcessor.WPF.Services
 
                             double r = c.R / 255.0; double g = c.G / 255.0; double b = c.B / 255.0;
                             
-                            // [보정] 폰트 크기: WPF(96 DPI) -> PDF(72 DPI) = 0.75배
-                            double pdfFontSize = ann.FontSize * 72.0 / 96.0;
+                            // [보정] 폰트 크기: WPF(96) -> PDF(72)
+                            double pdfFontSize = ann.FontSize * 0.75;
 
                             annot.Elements["/DA"] = new PdfString($"/Helv {pdfFontSize:0.##} Tf {r.ToString("0.###", CultureInfo.InvariantCulture)} {g.ToString("0.###", CultureInfo.InvariantCulture)} {b.ToString("0.###", CultureInfo.InvariantCulture)} rg");
 
@@ -232,7 +227,6 @@ namespace SmartDocProcessor.WPF.Services
                                 var brush = new XSolidBrush(c);
                                 var tf = new XTextFormatter(gfx);
                                 tf.Alignment = XParagraphAlignment.Left;
-                                // 여백 없이(0,0) 그리기
                                 tf.DrawString(ann.Content, font, brush, formRect, XStringFormats.TopLeft);
                             }
                             var apDict = new PdfDictionary(doc);
@@ -243,7 +237,6 @@ namespace SmartDocProcessor.WPF.Services
                         }
                         else 
                         {
-                            // 형광펜 / 밑줄
                             var annot = new CustomPdfAnnotation(doc);
                             annot.Elements.SetName(PdfAnnotation.Keys.Type, "/Annot");
                             annot.Elements.SetName(PdfAnnotation.Keys.Subtype, ann.Type.StartsWith("HIGHLIGHT") ? "/Highlight" : "/Underline");
@@ -256,21 +249,17 @@ namespace SmartDocProcessor.WPF.Services
                                 annot.Elements["/C"] = new PdfArray(doc, new PdfReal(1), new PdfReal(0), new PdfReal(0));
                             }
 
-                            // [중요] QuadPoints 설정 (PDF 표준 순서: LT, RT, LB, RB 가 아니라 Z order)
-                            // PDF QuadPoints는 8개의 숫자로 구성됨: x1, y1, x2, y2, x3, y3, x4, y4
-                            // 순서: Top-Left, Top-Right, Bottom-Left, Bottom-Right 
-                            // *주의: PDF 좌표계이므로 Y값이 클수록 위쪽임*
-                            
-                            double x = pdfX;
-                            double y_bottom = pdfY;
-                            double y_top = pdfY + ann.Height;
+                            // [중요] QuadPoints (좌상, 우상, 좌하, 우하) - PDF 좌표계 기준 (Y는 위쪽이 큼)
+                            double x = pdfLeftX;
+                            double y_bottom = pdfBottomY;
+                            double y_top = pdfTopY;
                             double w = ann.Width;
 
                             var qp = new PdfArray(doc);
-                            qp.Elements.Add(new PdfReal(x));     qp.Elements.Add(new PdfReal(y_top));    // Top-Left
-                            qp.Elements.Add(new PdfReal(x + w)); qp.Elements.Add(new PdfReal(y_top));    // Top-Right
-                            qp.Elements.Add(new PdfReal(x));     qp.Elements.Add(new PdfReal(y_bottom)); // Bottom-Left
-                            qp.Elements.Add(new PdfReal(x + w)); qp.Elements.Add(new PdfReal(y_bottom)); // Bottom-Right
+                            qp.Elements.Add(new PdfReal(x));     qp.Elements.Add(new PdfReal(y_top));    // TL
+                            qp.Elements.Add(new PdfReal(x + w)); qp.Elements.Add(new PdfReal(y_top));    // TR
+                            qp.Elements.Add(new PdfReal(x));     qp.Elements.Add(new PdfReal(y_bottom)); // BL
+                            qp.Elements.Add(new PdfReal(x + w)); qp.Elements.Add(new PdfReal(y_bottom)); // BR
                             
                             annot.Elements["/QuadPoints"] = qp;
                             page.Annotations.Add(annot);
