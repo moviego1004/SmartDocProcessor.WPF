@@ -83,6 +83,7 @@ namespace SmartDocProcessor.WPF.Services
             } catch { return pdfBytes; }
         }
 
+        // [수정] 불러오기: 72 DPI -> 96 DPI 변환 ( / 0.75 )
         public List<AnnotationData> ExtractAnnotationsFromMetadata(byte[] pdfBytes)
         {
             var result = new List<AnnotationData>();
@@ -103,13 +104,11 @@ namespace SmartDocProcessor.WPF.Services
                                     var subType = annot.Elements.GetString("/Subtype");
                                     var rect = annot.Rectangle;
                                     
-                                    // PDF(72DPI) -> WPF(96DPI) 좌표 변환
-                                    // 1. CropBox 오프셋 제거
+                                    // 1. PDF 좌표계 보정 (Bottom-Up -> Top-Down)
+                                    double pdfY = (pageHeight + yOffset) - rect.Y2;
                                     double pdfX = rect.X1 - xOffset;
-                                    double pdfY = (pageHeight + yOffset) - rect.Y2; // Top-Down으로 변환
 
-                                    // 2. DPI 스케일링 (PDF Point -> WPF Pixel)
-                                    // 72 -> 96 ( / 0.75 )
+                                    // 2. DPI 변환 (Point -> Pixel)
                                     double appX = pdfX / 0.75;
                                     double appY = pdfY / 0.75;
                                     double appW = rect.Width / 0.75;
@@ -139,7 +138,7 @@ namespace SmartDocProcessor.WPF.Services
             try {
                 var fontMatch = Regex.Match(da, @"([\d\.]+)\s+Tf");
                 if (fontMatch.Success && double.TryParse(fontMatch.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out double size)) {
-                    // PDF(72) -> WPF(96) 복원
+                    // PDF(72) -> WPF(96)
                     data.FontSize = (int)Math.Round(size / 0.75);
                 }
                 
@@ -153,6 +152,7 @@ namespace SmartDocProcessor.WPF.Services
             } catch { }
         }
 
+        // [수정] 저장: 96 DPI -> 72 DPI 변환 ( * 0.75 )
         public byte[] SavePdfWithAnnotations(byte[] originalPdf, List<AnnotationData> annotations, double currentScale)
         {
             using (var inStream = new MemoryStream(originalPdf))
@@ -176,7 +176,7 @@ namespace SmartDocProcessor.WPF.Services
                     double pageTop = page.CropBox.Height > 0 ? (page.CropBox.Y1 + page.CropBox.Height) : page.Height;
                     double xOffset = page.CropBox.X1;
 
-                    // 1. OCR 텍스트 (투명 저장)
+                    // 1. OCR 텍스트 저장 (투명)
                     var ocrItems = group.Where(a => a.Type == "OCR_TEXT");
                     if (ocrItems.Any())
                     {
@@ -185,18 +185,36 @@ namespace SmartDocProcessor.WPF.Services
                             foreach (var ann in ocrItems)
                             {
                                 var brush = new XSolidBrush(XColor.FromArgb(1, 0, 0, 0)); // 투명
-                                var font = new XFont("Arial", ann.FontSize, XFontStyleEx.Regular);
-                                // OCR 좌표는 이미 PDF 기준일 가능성이 높으나(서비스 로직 확인 필요), 
-                                // 만약 어긋난다면 여기서도 스케일링 체크 필요. 일단 유지.
-                                gfx.DrawString(ann.Content, font, brush, new XRect(ann.X, ann.Y, ann.Width, ann.Height), XStringFormats.TopLeft);
+                                var font = new XFont("Arial", 10, XFontStyleEx.Regular); // 기본 10pt
+                                
+                                // OCR 좌표도 스케일링 필요 (WPF Pixel -> PDF Point)
+                                double ocrX = xOffset + (ann.X * 0.75);
+                                double ocrY = pageTop - (ann.Y * 0.75) - (ann.Height * 0.75); // Bottom-Up 변환
+                                double ocrW = ann.Width * 0.75;
+                                double ocrH = ann.Height * 0.75;
+
+                                // XGraphics는 기본적으로 Top-Left 기준이지만, PDF 페이지 변환 상태에 따름.
+                                // 보통 XGraphics on PDF Page는 Default User Space (Bottom-Up)이지만,
+                                // XGraphics가 내부적으로 Top-Down으로 뒤집어주기도 함.
+                                // PdfSharp XGraphics는 보통 Top-Left(0,0)을 사용하도록 매핑됨.
+                                // 하지만 여기서는 저수준 API가 아니라 XGraphics를 쓰므로, ann.X/Y (Pixel)를 Point로만 바꿔서 넣으면 됨.
+                                // (XGraphics가 알아서 Y축 뒤집음)
+                                
+                                // 다만, 위에서 직접 계산한 pdfY는 Bottom-Up임. XGraphics는 Top-Down.
+                                // 따라서 XGraphics에는 'Top-Left 기준 Point 좌표'를 넣어야 함.
+                                // WPF Y(Pixel) * 0.75 => PDF Y(Point, Top-Down)
+                                
+                                gfx.DrawString(ann.Content, font, brush, 
+                                    new XRect(ann.X * 0.75, ann.Y * 0.75, ann.Width * 0.75, ann.Height * 0.75), 
+                                    XStringFormats.TopLeft);
                             }
                         }
                     }
 
-                    // 2. 사용자 주석 저장
+                    // 2. 사용자 주석 저장 (Low-Level Objects 사용 -> Bottom-Up 좌표 필요)
                     foreach (var ann in group.Where(a => a.Type != "OCR_TEXT"))
                     {
-                        // [핵심 수정] WPF(96 DPI) -> PDF(72 DPI) 좌표 변환 (0.75배)
+                        // DPI 변환 (Pixel -> Point)
                         double scaledX = ann.X * 0.75;
                         double scaledY = ann.Y * 0.75;
                         double scaledW = ann.Width * 0.75;
@@ -225,14 +243,12 @@ namespace SmartDocProcessor.WPF.Services
                             } catch {}
 
                             double r = c.R / 255.0; double g = c.G / 255.0; double b = c.B / 255.0;
-                            double pdfFontSize = ann.FontSize * 0.75; // 폰트 크기도 보정
+                            double pdfFontSize = ann.FontSize * 0.75; 
 
                             annot.Elements["/DA"] = new PdfString($"/Helv {pdfFontSize:0.##} Tf {r.ToString("0.###", CultureInfo.InvariantCulture)} {g.ToString("0.###", CultureInfo.InvariantCulture)} {b.ToString("0.###", CultureInfo.InvariantCulture)} rg");
 
-                            // 폼 그리기
                             var formRect = new XRect(0, 0, scaledW, scaledH);
                             var form = new XForm(doc, formRect);
-                            
                             using (var gfx = XGraphics.FromForm(form))
                             {
                                 var options = new XPdfFontOptions(PdfFontEncoding.Unicode);
@@ -269,10 +285,10 @@ namespace SmartDocProcessor.WPF.Services
                             double w = scaledW;
 
                             var qp = new PdfArray(doc);
-                            qp.Elements.Add(new PdfReal(x));     qp.Elements.Add(new PdfReal(y_top));    // TL
-                            qp.Elements.Add(new PdfReal(x + w)); qp.Elements.Add(new PdfReal(y_top));    // TR
-                            qp.Elements.Add(new PdfReal(x));     qp.Elements.Add(new PdfReal(y_bottom)); // BL
-                            qp.Elements.Add(new PdfReal(x + w)); qp.Elements.Add(new PdfReal(y_bottom)); // BR
+                            qp.Elements.Add(new PdfReal(x));     qp.Elements.Add(new PdfReal(y_top));    
+                            qp.Elements.Add(new PdfReal(x + w)); qp.Elements.Add(new PdfReal(y_top));    
+                            qp.Elements.Add(new PdfReal(x));     qp.Elements.Add(new PdfReal(y_bottom)); 
+                            qp.Elements.Add(new PdfReal(x + w)); qp.Elements.Add(new PdfReal(y_bottom)); 
                             
                             annot.Elements["/QuadPoints"] = qp;
                             page.Annotations.Add(annot);
