@@ -9,9 +9,11 @@ namespace SmartDocProcessor.WPF.Helpers
 {
     public static class PdfRenderer
     {
-        // PDF 바이트 배열에서 특정 페이지를 WPF 이미지로 변환
-        public static async Task<BitmapSource> RenderPageToBitmapAsync(byte[] pdfData, int pageIndex)
+        // [수정] 반환 타입에 '?' 추가 (Task<BitmapSource?>)
+        public static async Task<BitmapSource?> RenderPageToBitmapAsync(byte[] pdfData, int pageIndex)
         {
+            if (pdfData == null || pdfData.Length == 0) return null;
+
             using (var stream = new InMemoryRandomAccessStream())
             {
                 using (var writer = new DataWriter(stream.GetOutputStreamAt(0)))
@@ -21,11 +23,13 @@ namespace SmartDocProcessor.WPF.Helpers
                 }
 
                 var pdfDoc = await PdfDocument.LoadFromStreamAsync(stream);
+                
+                // 페이지 범위 확인
                 if (pageIndex < 1 || pageIndex > pdfDoc.PageCount) return null;
 
                 var page = pdfDoc.GetPage((uint)pageIndex - 1);
 
-                // 고해상도 렌더링을 위해 스케일 조정 가능 (기본 1.0)
+                // 고해상도 렌더링을 위해 스케일 조정 (1.5배)
                 var renderOptions = new PdfPageRenderOptions { DestinationWidth = (uint)(page.Size.Width * 1.5) }; 
                 
                 using (var imageStream = new InMemoryRandomAccessStream())

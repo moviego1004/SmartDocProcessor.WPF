@@ -112,6 +112,58 @@ namespace SmartDocProcessor.WPF
             }
         }
 
+        // --- [복구됨] 문서 렌더링 ---
+        private async System.Threading.Tasks.Task RenderDocument()
+        {
+            var dataToRender = _cleanPdfData ?? _pdfData;
+            if (dataToRender == null) return;
+
+            DocumentContainer.Children.Clear();
+            for (int i = 1; i <= _totalPages; i++)
+            {
+                var bitmap = await PdfRenderer.RenderPageToBitmapAsync(dataToRender, i);
+                if (bitmap == null) continue;
+
+                var pageGrid = new Grid { Margin = new Thickness(0, 0, 0, 20) };
+                pageGrid.Width = bitmap.PixelWidth;
+                pageGrid.Height = bitmap.PixelHeight;
+
+                var img = new Image { Source = bitmap, Stretch = Stretch.None };
+                pageGrid.Children.Add(img);
+
+                var canvas = new Canvas 
+                { 
+                    Background = Brushes.Transparent, 
+                    Width = bitmap.PixelWidth, Height = bitmap.PixelHeight, 
+                    Tag = i 
+                };
+                canvas.MouseDown += Canvas_MouseDown;
+                canvas.MouseMove += Canvas_MouseMove;
+                canvas.MouseUp += Canvas_MouseUp;
+
+                pageGrid.Children.Add(canvas);
+                DrawAnnotationsForPage(i, canvas);
+                DocumentContainer.Children.Add(pageGrid);
+            }
+        }
+
+        // --- [복구됨] 페이지 새로고침 ---
+        private void RefreshPageCanvas(int pageIndex)
+        {
+            if (pageIndex < 1 || pageIndex > DocumentContainer.Children.Count) return;
+            
+            // StackPanel의 자식 요소(Grid) 가져오기
+            if (DocumentContainer.Children[pageIndex - 1] is Grid pageGrid)
+            {
+                // Grid 안의 Canvas 찾기
+                var canvas = pageGrid.Children.OfType<Canvas>().FirstOrDefault();
+                if (canvas != null)
+                {
+                    DrawAnnotationsForPage(pageIndex, canvas);
+                }
+            }
+        }
+
         // --- 2. 캔버스 마우스 이벤트 ---
         private void Canvas_MouseDown(object sender, MouseButtonEventArgs e)
         {
