@@ -26,7 +26,6 @@ namespace SmartDocProcessor.WPF
         private byte[]? _cleanPdfData; 
         private List<AnnotationData> _annotations = new List<AnnotationData>();
         
-        // 텍스트 선택용 데이터
         private Dictionary<int, List<TextData>> _pageTextData = new Dictionary<int, List<TextData>>();
         private List<TextData> _selectedTextData = new List<TextData>();
 
@@ -56,7 +55,6 @@ namespace SmartDocProcessor.WPF
             if (string.IsNullOrEmpty(_userSettings.DefaultFontFamily)) _userSettings.DefaultFontFamily = "Malgun Gothic";
         }
 
-        // --- 1. 파일 열기 & 드래그 활성화 로직 ---
         private async void BtnOpen_Click(object sender, RoutedEventArgs e)
         {
             var dlg = new OpenFileDialog { Filter = "PDF Files|*.pdf" };
@@ -112,7 +110,6 @@ namespace SmartDocProcessor.WPF
             }
         }
 
-        // --- [복구됨] 문서 렌더링 ---
         private async System.Threading.Tasks.Task RenderDocument()
         {
             var dataToRender = _cleanPdfData ?? _pdfData;
@@ -147,24 +144,17 @@ namespace SmartDocProcessor.WPF
             }
         }
 
-        // --- [복구됨] 페이지 새로고침 ---
         private void RefreshPageCanvas(int pageIndex)
         {
             if (pageIndex < 1 || pageIndex > DocumentContainer.Children.Count) return;
-            
-            // StackPanel의 자식 요소(Grid) 가져오기
             if (DocumentContainer.Children[pageIndex - 1] is Grid pageGrid)
             {
-                // Grid 안의 Canvas 찾기
                 var canvas = pageGrid.Children.OfType<Canvas>().FirstOrDefault();
-                if (canvas != null)
-                {
-                    DrawAnnotationsForPage(pageIndex, canvas);
-                }
+                if (canvas != null) DrawAnnotationsForPage(pageIndex, canvas);
             }
         }
 
-        // --- 2. 캔버스 마우스 이벤트 ---
+        // 캔버스 마우스 이벤트
         private void Canvas_MouseDown(object sender, MouseButtonEventArgs e)
         {
             if (sender is not Canvas canvas) return;
@@ -372,7 +362,11 @@ namespace SmartDocProcessor.WPF
                         Width = w, 
                         MinHeight = Math.Max(h, 20),
                         AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
-                        Background = Brushes.Transparent, BorderThickness = new Thickness(0), Padding = new Thickness(0)
+                        Background = Brushes.Transparent, BorderThickness = new Thickness(0),
+                        
+                        // [핵심] 패딩 0으로 설정하여 PDF 렌더링 위치와 일치시킴
+                        Padding = new Thickness(0),
+                        VerticalContentAlignment = VerticalAlignment.Center // 또는 Top
                     };
                     tb.TextChanged += (s, args) => { ann.Content = tb.Text; if (tb.ActualHeight > 0) ann.Height = tb.ActualHeight / RENDER_SCALE; };
                     tb.SizeChanged += (s, args) => { if (args.NewSize.Height > 0) ann.Height = args.NewSize.Height / RENDER_SCALE; };
