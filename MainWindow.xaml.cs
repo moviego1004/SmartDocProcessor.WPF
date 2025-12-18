@@ -263,4 +263,3 @@ namespace SmartDocProcessor.WPF
         private void BtnUndo_Click(object sender, RoutedEventArgs e) { }
     }
 }
-}
