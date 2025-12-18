@@ -45,26 +45,35 @@ namespace SmartDocProcessor.WPF.Services
             } catch { }
         }
 
+        // PDF가 Searchable(텍스트 포함)인지 확인
         public bool IsPdfSearchable(byte[] pdfBytes)
         {
-            try {
-                using (var inStream = new MemoryStream(pdfBytes)) {
+            try
+            {
+                using (var inStream = new MemoryStream(pdfBytes))
+                {
                     var doc = PdfReader.Open(inStream, PdfDocumentOpenMode.Import);
+                    // 속도 최적화를 위해 앞쪽 3페이지만 검사
                     int pagesToCheck = Math.Min(doc.PageCount, 3);
-                    for (int i = 0; i < pagesToCheck; i++) {
+                    for (int i = 0; i < pagesToCheck; i++)
+                    {
                         var content = ContentReader.ReadContent(doc.Pages[i]);
                         if (HasTextOperators(content)) return true;
                     }
                 }
-            } catch { }
+            }
+            catch { }
             return false;
         }
 
         private bool HasTextOperators(CObject content)
         {
-            if (content is COperator op) {
+            if (content is COperator op)
+            {
                 if (op.OpCode.Name == "Tj" || op.OpCode.Name == "TJ" || op.OpCode.Name == "\'") return true;
-            } else if (content is CSequence seq) {
+            }
+            else if (content is CSequence seq)
+            {
                 foreach (var item in seq) if (HasTextOperators(item)) return true;
             }
             return false;
@@ -72,15 +81,18 @@ namespace SmartDocProcessor.WPF.Services
 
         public byte[] GetPdfBytesWithoutAnnotations(byte[] pdfBytes)
         {
-            try {
+            try
+            {
                 using (var inStream = new MemoryStream(pdfBytes))
-                using (var outStream = new MemoryStream()) {
+                using (var outStream = new MemoryStream())
+                {
                     var doc = PdfReader.Open(inStream, PdfDocumentOpenMode.Modify);
                     foreach (var page in doc.Pages) if (page.Annotations != null) page.Annotations.Clear();
                     doc.Save(outStream);
                     return outStream.ToArray();
                 }
-            } catch { return pdfBytes; }
+            }
+            catch { return pdfBytes; }
         }
 
         public List<AnnotationData> ExtractAnnotationsFromMetadata(byte[] pdfBytes)
@@ -93,7 +105,7 @@ namespace SmartDocProcessor.WPF.Services
                         var page = doc.Pages[i];
                         int pageNum = i + 1;
                         
-                        // [수정] Point 속성 제거 (이미 double 타입)
+                        // [수정] .Point 제거 (이미 double 타입)
                         double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height;
                         double yOffset = page.CropBox.Y1;
                         double xOffset = page.CropBox.X1;
@@ -165,10 +177,11 @@ namespace SmartDocProcessor.WPF.Services
                     if (pageIdx < 0 || pageIdx >= doc.PageCount) continue;
                     var page = doc.Pages[pageIdx];
                     
-                    // [중요] CropBox 기준 좌표 계산 (Point 속성 제거)
+                    // [중요] CropBox 기준 좌표 계산
                     double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height;
                     double xOffset = page.CropBox.X1;
                     double yOffset = page.CropBox.Y1;
+                    double pageTop = pageHeight + yOffset;
 
                     // 1. OCR 텍스트 (투명 저장)
                     var ocrItems = group.Where(a => a.Type == "OCR_TEXT");
@@ -180,6 +193,7 @@ namespace SmartDocProcessor.WPF.Services
                             {
                                 var brush = new XSolidBrush(XColor.FromArgb(1, 0, 0, 0)); // 투명
                                 var font = new XFont("Arial", ann.FontSize, XFontStyleEx.Regular);
+                                // OCR 좌표는 그대로 사용
                                 gfx.DrawString(ann.Content, font, brush, new XRect(ann.X, ann.Y, ann.Width, ann.Height), XStringFormats.TopLeft);
                             }
                         }
@@ -189,7 +203,7 @@ namespace SmartDocProcessor.WPF.Services
                     foreach (var ann in group.Where(a => a.Type != "OCR_TEXT"))
                     {
                         // [핵심] 좌표 변환: WPF(Top-Down) -> PDF(Bottom-Up)
-                        double pdfTopY = (pageHeight + yOffset) - ann.Y;
+                        double pdfTopY = pageTop - ann.Y;
                         double pdfBottomY = pdfTopY - ann.Height;
                         double pdfLeftX = xOffset + ann.X;
 
@@ -211,9 +225,7 @@ namespace SmartDocProcessor.WPF.Services
                             } catch {}
 
                             double r = c.R / 255.0; double g = c.G / 255.0; double b = c.B / 255.0;
-                            
-                            // [보정] 폰트 크기: WPF(96) -> PDF(72)
-                            double pdfFontSize = ann.FontSize * 0.75;
+                            double pdfFontSize = ann.FontSize * 0.75; // 폰트 크기 보정
 
                             annot.Elements["/DA"] = new PdfString($"/Helv {pdfFontSize:0.##} Tf {r.ToString("0.###", CultureInfo.InvariantCulture)} {g.ToString("0.###", CultureInfo.InvariantCulture)} {b.ToString("0.###", CultureInfo.InvariantCulture)} rg");
 
@@ -249,7 +261,7 @@ namespace SmartDocProcessor.WPF.Services
                                 annot.Elements["/C"] = new PdfArray(doc, new PdfReal(1), new PdfReal(0), new PdfReal(0));
                             }
 
-                            // [중요] QuadPoints (좌상, 우상, 좌하, 우하) - PDF 좌표계 기준 (Y는 위쪽이 큼)
+                            // QuadPoints
                             double x = pdfLeftX;
                             double y_bottom = pdfBottomY;
                             double y_top = pdfTopY;
