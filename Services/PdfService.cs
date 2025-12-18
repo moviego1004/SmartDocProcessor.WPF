@@ -45,7 +45,7 @@ namespace SmartDocProcessor.WPF.Services
             } catch { }
         }
 
-        // PDF가 텍스트(Searchable)를 포함하는지 검사
+        // [신규] PDF가 Searchable(텍스트 포함)인지 확인
         public bool IsPdfSearchable(byte[] pdfBytes)
         {
             try
@@ -53,7 +53,6 @@ namespace SmartDocProcessor.WPF.Services
                 using (var inStream = new MemoryStream(pdfBytes))
                 {
                     var doc = PdfReader.Open(inStream, PdfDocumentOpenMode.Import);
-                    // 속도를 위해 앞쪽 3페이지만 검사
                     int pagesToCheck = Math.Min(doc.PageCount, 3);
                     for (int i = 0; i < pagesToCheck; i++)
                     {
@@ -183,7 +182,7 @@ namespace SmartDocProcessor.WPF.Services
 
                         if (ann.Type == "TEXT")
                         {
-                            var annot = new CustomPdfAnnotation(doc);
+                            var annot = new CustomPdfAnnotation(doc); // [수정] CustomPdfAnnotation 사용
                             annot.Elements.SetName(PdfAnnotation.Keys.Type, "/Annot");
                             annot.Elements.SetName(PdfAnnotation.Keys.Subtype, "/FreeText");
                             annot.Elements.SetRectangle(PdfAnnotation.Keys.Rect, rect);
@@ -221,7 +220,7 @@ namespace SmartDocProcessor.WPF.Services
                         }
                         else 
                         {
-                            var annot = new CustomPdfAnnotation(doc);
+                            var annot = new CustomPdfAnnotation(doc); // [수정] CustomPdfAnnotation 사용
                             annot.Elements.SetName(PdfAnnotation.Keys.Type, "/Annot");
                             annot.Elements.SetName(PdfAnnotation.Keys.Subtype, ann.Type.StartsWith("HIGHLIGHT") ? "/Highlight" : "/Underline");
                             annot.Elements.SetRectangle(PdfAnnotation.Keys.Rect, rect);
@@ -263,7 +262,7 @@ namespace SmartDocProcessor.WPF.Services
         }
     }
 
-    // [중요] 접근 제한자 문제를 피하기 위해 public 클래스로 선언
+    // [중요] CS0122 에러 해결을 위해 public 클래스로 선언
     public class CustomPdfAnnotation : PdfAnnotation
     {
         public CustomPdfAnnotation(PdfDocument document) : base(document) { }

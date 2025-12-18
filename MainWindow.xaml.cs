@@ -76,10 +76,8 @@ namespace SmartDocProcessor.WPF
                 _zoomLevel = 1.0; ApplyZoom();
                 await RenderDocument();
 
-                // [중요] Searchable이면 텍스트 데이터를 로드하여 드래그 가능하게 함
                 if (_pdfService.IsPdfSearchable(_pdfData))
                 {
-                    // 비동기로 현재 페이지의 텍스트 데이터 로드
                     await LoadTextDataForPage(_focusedPage);
                 }
             }
@@ -92,7 +90,6 @@ namespace SmartDocProcessor.WPF
             MessageBox.Show("전체 페이지 OCR 분석을 시작합니다. 완료되면 드래그가 가능해집니다.");
             this.Cursor = Cursors.Wait;
 
-            // 전체 페이지에 대해 텍스트 데이터 추출 (드래그 가능 상태로 만듦)
             for (int i = 1; i <= _totalPages; i++)
             {
                 if (!_pageTextData.ContainsKey(i))
@@ -123,7 +120,6 @@ namespace SmartDocProcessor.WPF
             if (canvas.Tag is int pageNum) 
             {
                 _focusedPage = pageNum;
-                // Searchable인 경우, 페이지 이동 시 해당 페이지 데이터가 없으면 로드 시도
                 if (_pdfService.IsPdfSearchable(_pdfData ?? Array.Empty<byte>()) && !_pageTextData.ContainsKey(pageNum))
                 {
                      _ = LoadTextDataForPage(pageNum); 
@@ -134,7 +130,6 @@ namespace SmartDocProcessor.WPF
             _currentDrawingCanvas = canvas;
             canvas.CaptureMouse();
 
-            // [조건] 커서 모드이고 해당 페이지의 텍스트 데이터가 있으면 텍스트 선택 모드 진입
             if (_currentTool == "CURSOR" && _pageTextData.ContainsKey(_focusedPage))
             {
                 _isTextSelecting = true;
@@ -271,7 +266,6 @@ namespace SmartDocProcessor.WPF
             foreach (var r in toRemove) canvas.Children.Remove(r);
         }
 
-        // --- 팝업 메뉴 동작 ---
         private void BtnCopyText_Click(object sender, RoutedEventArgs e)
         {
             if (_selectedTextData.Count > 0)
@@ -303,7 +297,6 @@ namespace SmartDocProcessor.WPF
             PopupTextMenu.IsOpen = false;
         }
 
-        // --- 텍스트 박스 그리기 및 기타 ---
         private void DrawAnnotationsForPage(int pageIndex, Canvas canvas)
         {
             canvas.Children.Clear();

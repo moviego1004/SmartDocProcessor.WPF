@@ -42,14 +42,11 @@
         <Border Grid.Row="1" Grid.Column="0" BorderBrush="#DDDDDD" BorderThickness="0,0,1,0" Background="White" Padding="10">
             <StackPanel>
                 <TextBlock Text="속성 편집" FontWeight="Bold" FontSize="14" Margin="0,0,0,10"/>
-                
                 <StackPanel x:Name="PnlProperties" Visibility="Collapsed">
                     <TextBlock Text="선택된 주석:" Foreground="Gray"/>
                     <TextBlock x:Name="TxtSelectedType" FontWeight="Bold" Margin="0,0,0,10"/>
-
                     <TextBlock Text="텍스트 내용"/>
                     <TextBox x:Name="TxtContent" Height="80" TextWrapping="Wrap" AcceptsReturn="True" Margin="0,5,0,10" TextChanged="TxtProperty_Changed"/>
-
                     <StackPanel x:Name="PnlTextProps">
                         <TextBlock Text="폰트 종류"/>
                         <ComboBox x:Name="CboPropFontFamily" Margin="0,5,0,10" SelectionChanged="CboPropFontFamily_SelectionChanged">
@@ -58,12 +55,9 @@
                             <ComboBoxItem Content="돋움" Tag="Dotum"/>
                             <ComboBoxItem Content="바탕" Tag="Batang"/>
                         </ComboBox>
-
                         <TextBlock Text="글자 크기"/>
                         <TextBox x:Name="TxtFontSize" Margin="0,5,0,10" TextChanged="TxtProperty_Changed"/>
-                        
                         <CheckBox x:Name="ChkPropBold" Content="굵게 (Bold)" Margin="0,5,0,10" Click="ChkPropBold_Click"/>
-                        
                         <TextBlock Text="글자 색상"/>
                         <ComboBox x:Name="CboPropColor" Margin="0,5,0,10" SelectionChanged="CboPropColor_SelectionChanged">
                             <ComboBoxItem Content="검정 (Black)" Tag="#FF000000"/>
@@ -74,10 +68,8 @@
                             <ComboBoxItem Content="흰색 (White)" Tag="#FFFFFFFF"/>
                         </ComboBox>
                     </StackPanel>
-                    
                     <Button Content="🗑️ 삭제 (Delete)" Background="#FFDDDD" Margin="0,10" Click="BtnDeleteAnnot_Click"/>
                 </StackPanel>
-                
                 <TextBlock x:Name="TxtNoSelection" Text="선택된 항목 없음" Foreground="#AAAAAA" FontStyle="Italic"/>
                 <Separator Margin="0,20"/>
                 <TextBlock Text="문서 정보" FontWeight="Bold"/>

@@ -11,6 +11,16 @@ using Windows.Storage.Streams;
 
 namespace SmartDocProcessor.WPF.Services
 {
+    // [신규] 텍스트 위치 정보를 담을 클래스
+    public class TextData
+    {
+        public string Text { get; set; } = "";
+        public double X { get; set; }
+        public double Y { get; set; }
+        public double Width { get; set; }
+        public double Height { get; set; }
+    }
+
     public class OcrResultData
     {
         public string Text { get; set; } = "";
@@ -38,81 +48,74 @@ namespace SmartDocProcessor.WPF.Services
             } catch { }
         }
 
-        public string GetCurrentLanguage()
-        {
-            return _ocrEngine?.RecognizerLanguage.DisplayName ?? "OCR 엔진 없음";
-        }
+        public string GetCurrentLanguage() => _ocrEngine?.RecognizerLanguage.DisplayName ?? "OCR 엔진 없음";
 
-        // PDF 바이트를 받아 특정 페이지를 렌더링하고 OCR 수행
-        public async Task PerformOcr(byte[] pdfBytes, List<AnnotationData> annotations, int pageIndex)
+        // [신규] 텍스트 데이터 추출 (드래그 선택용)
+        public async Task<List<TextData>> ExtractTextData(byte[] pdfData, int pageIndex)
         {
-            if (_ocrEngine == null || pdfBytes == null || pdfBytes.Length == 0) return;
+            var list = new List<TextData>();
+            if (_ocrEngine == null || pdfData == null) return list;
 
             try
             {
-                // 1. PDF 로드 (MemoryStream -> IRandomAccessStream)
-                using (var randomAccessStream = new InMemoryRandomAccessStream())
+                using (var stream = new InMemoryRandomAccessStream())
                 {
-                    using (var writer = new DataWriter(randomAccessStream.GetOutputStreamAt(0))) {
-                        writer.WriteBytes(pdfBytes);
+                    using (var writer = new DataWriter(stream.GetOutputStreamAt(0))) {
+                        writer.WriteBytes(pdfData);
                         await writer.StoreAsync();
                     }
 
-                    var pdfDoc = await PdfDocument.LoadFromStreamAsync(randomAccessStream);
-                    
-                    if (pageIndex < 1 || pageIndex > pdfDoc.PageCount) return;
+                    var pdfDoc = await PdfDocument.LoadFromStreamAsync(stream);
+                    if (pageIndex < 1 || pageIndex > pdfDoc.PageCount) return list;
+                    var page = pdfDoc.GetPage((uint)pageIndex - 1);
 
-                    // 2. 해당 페이지 가져오기 (0-based index)
-                    var pdfPage = pdfDoc.GetPage((uint)pageIndex - 1);
+                    // OCR 좌표 정밀도를 위해 2배 확대
+                    double scale = 2.0;
+                    var options = new PdfPageRenderOptions { DestinationWidth = (uint)(page.Size.Width * scale) };
 
-                    // 3. 이미지로 렌더링
-                    using (var imageStream = new InMemoryRandomAccessStream())
+                    using (var imgStream = new InMemoryRandomAccessStream())
                     {
-                        await pdfPage.RenderToStreamAsync(imageStream);
-
-                        // 4. OCR 수행
-                        var decoder = await BitmapDecoder.CreateAsync(imageStream);
+                        await page.RenderToStreamAsync(imgStream, options);
+                        var decoder = await BitmapDecoder.CreateAsync(imgStream);
                         using (var softwareBitmap = await decoder.GetSoftwareBitmapAsync())
                         {
-                            var result = await _ocrEngine.RecognizeAsync(softwareBitmap);
-
-                            // 5. 결과를 AnnotationData로 변환하여 리스트에 추가
-                            foreach (var line in result.Lines)
+                            var ocrResult = await _ocrEngine.RecognizeAsync(softwareBitmap);
+                            foreach (var line in ocrResult.Lines)
                             {
-                                // 픽셀 좌표(96 DPI)를 PDF 포인트(72 DPI)로 대략 변환 (0.75 배)
-                                double scaleFactor = 0.75; 
-                                
-                                double minX = double.MaxValue, minY = double.MaxValue;
-                                double maxX = double.MinValue, maxY = double.MinValue;
-
-                                foreach(var word in line.Words) {
-                                    if(word.BoundingRect.X < minX) minX = word.BoundingRect.X;
-                                    if(word.BoundingRect.Y < minY) minY = word.BoundingRect.Y;
-                                    if(word.BoundingRect.Right > maxX) maxX = word.BoundingRect.Right;
-                                    if(word.BoundingRect.Bottom > maxY) maxY = word.BoundingRect.Bottom;
-                                }
-
-                                var ann = new AnnotationData
+                                foreach (var word in line.Words)
                                 {
-                                    Type = "OCR_TEXT",
-                                    Content = line.Text,
-                                    X = minX * scaleFactor,
-                                    Y = minY * scaleFactor,
-                                    Width = (maxX - minX) * scaleFactor,
-                                    Height = (maxY - minY) * scaleFactor,
-                                    Page = pageIndex,
-                                    Color = "#000000",
-                                    FontSize = 10 
-                                };
-                                annotations.Add(ann);
+                                    var rect = word.BoundingRect;
+                                    list.Add(new TextData
+                                    {
+                                        Text = word.Text,
+                                        X = rect.X / scale,
+                                        Y = rect.Y / scale,
+                                        Width = rect.Width / scale,
+                                        Height = rect.Height / scale
+                                    });
+                                }
                             }
                         }
                     }
                 }
             }
-            catch (Exception ex)
+            catch { }
+            return list;
+        }
+
+        public async Task PerformOcr(byte[] pdfBytes, List<AnnotationData> annotations, int pageIndex)
+        {
+            var texts = await ExtractTextData(pdfBytes, pageIndex);
+            foreach (var t in texts)
             {
-                System.Diagnostics.Debug.WriteLine($"PerformOcr Error: {ex.Message}");
+                annotations.Add(new AnnotationData
+                {
+                    Type = "OCR_TEXT",
+                    Content = t.Text,
+                    X = t.X, Y = t.Y, Width = t.Width, Height = t.Height,
+                    Page = pageIndex,
+                    Color = "#000000", FontSize = 10 
+                });
             }
         }
     }
