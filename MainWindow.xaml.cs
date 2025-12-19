@@ -53,6 +53,7 @@ namespace SmartDocProcessor.WPF
         private Canvas? _currentDrawingCanvas; 
         private List<TextData> _selectedTextData = new List<TextData>();
 
+        // [중요] 뷰어 확대 배율 (DrawAnnotationsForPage에서 좌표에 곱해짐)
         private const double RENDER_SCALE = 1.5; 
         private bool _isUpdatingUi = false;
 
@@ -185,6 +186,7 @@ namespace SmartDocProcessor.WPF
             }
         }
 
+        // [수정] 스케일링 로직 제거 및 OCR fallback 보완
         private async Task LoadTextDataForPage(int page)
         {
             if (_activeDoc == null || _activeDoc.OriginalPdfData == null) return;
@@ -192,21 +194,26 @@ namespace SmartDocProcessor.WPF
             {
                 byte[] targetData = _activeDoc.OriginalPdfData;
                 List<TextData> texts = new List<TextData>();
-                bool useOcr = true;
+                bool needsOcr = true;
 
-                // 1. Searchable PDF라면 텍스트 추출 시도
+                // 1. PdfPig 추출 (원본 좌표 사용)
                 if (_pdfService.IsPdfSearchable(targetData))
                 {
                     texts = _pdfService.ExtractTextFromPage(targetData, page);
-                    // 추출된 텍스트가 있고, 좌표도 유효한지 확인 (너비가 0보다 커야 함)
-                    if (texts.Count > 0 && texts.Any(t => t.Width > 0))
+                    if (texts.Count > 0)
                     {
-                        useOcr = false; // 성공했으므로 OCR 안 함
+                        bool hasDimensions = texts.Any(t => t.Width > 0 && t.Height > 0);
+                        bool isCorrupted = texts.Any(t => t.Text.Contains('\0')); 
+
+                        if (hasDimensions && !isCorrupted)
+                        {
+                            needsOcr = false; 
+                        }
                     }
                 }
 
-                // 2. 실패했거나 이미지 PDF면 OCR 실행
-                if (useOcr)
+                // 2. OCR 실행 (필요시)
+                if (needsOcr)
                 {
                     texts = await _ocrService.ExtractTextData(targetData, page);
                 }
@@ -287,6 +294,7 @@ namespace SmartDocProcessor.WPF
             if (_activeDoc == null) return;
             canvas.Children.Clear();
 
+            // 검색 결과 하이라이트 (RENDER_SCALE 곱함)
             if (_searchResults.Count > 0)
             {
                 var pageResults = _searchResults.Where(r => r.Page == pageIndex).ToList();
@@ -307,6 +315,7 @@ namespace SmartDocProcessor.WPF
                 }
             }
 
+            // 주석 그리기
             var pageAnns = _activeDoc.Annotations.Where(a => a.Page == pageIndex).ToList();
             foreach (var ann in pageAnns)
             {
