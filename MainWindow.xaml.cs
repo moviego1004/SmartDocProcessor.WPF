@@ -45,8 +45,6 @@ namespace SmartDocProcessor.WPF
         private bool _isDraggingAnnot = false;
         private bool _isResizingAnnot = false;
         private bool _isTextSelecting = false;
-        
-        // [신규] 렌더링 중 스크롤 이벤트 무시 플래그
         private bool _isRendering = false;
         
         private Point _dragStartPoint;
@@ -65,12 +63,9 @@ namespace SmartDocProcessor.WPF
             if (string.IsNullOrEmpty(_userSettings.DefaultFontFamily)) _userSettings.DefaultFontFamily = "Malgun Gothic";
             
             TabList.ItemsSource = _documents;
-            
-            // 스크롤 이벤트 연결
             MainScrollViewer.ScrollChanged += MainScrollViewer_ScrollChanged;
         }
 
-        // [수정] 렌더링 중이거나 문서가 없을 땐 저장하지 않음 (버그 수정)
         private void MainScrollViewer_ScrollChanged(object sender, ScrollChangedEventArgs e)
         {
             if (_activeDoc != null && !_isRendering)
@@ -116,7 +111,6 @@ namespace SmartDocProcessor.WPF
 
         private async void TabList_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            // 스크롤 저장은 ScrollChanged에서 처리
             if (e.AddedItems.Count > 0 && e.AddedItems[0] is PdfDocumentModel selectedDoc)
             {
                 await SwitchTab(selectedDoc);
@@ -152,7 +146,6 @@ namespace SmartDocProcessor.WPF
             
             await RenderDocument();
 
-            // [핵심] 렌더링 완료 후 스크롤 복원
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
                 if (_activeDoc == doc)
@@ -199,25 +192,28 @@ namespace SmartDocProcessor.WPF
             {
                 byte[] targetData = _activeDoc.OriginalPdfData;
                 List<TextData> texts = new List<TextData>();
-                
+                bool useOcr = true;
+
+                // 1. Searchable PDF라면 텍스트 추출 시도
                 if (_pdfService.IsPdfSearchable(targetData))
                 {
                     texts = _pdfService.ExtractTextFromPage(targetData, page);
-                    bool isValid = texts.Count > 0 && texts.Any(t => t.Width > 0 && t.Height > 0);
-                    if (isValid)
+                    // 추출된 텍스트가 있고, 좌표도 유효한지 확인 (너비가 0보다 커야 함)
+                    if (texts.Count > 0 && texts.Any(t => t.Width > 0))
                     {
-                        _activeDoc.PageTextData[page] = texts;
-                    }
-                    else
-                    {
-                        var ocrTexts = await _ocrService.ExtractTextData(targetData, page);
-                        if (ocrTexts.Count > 0) _activeDoc.PageTextData[page] = ocrTexts;
+                        useOcr = false; // 성공했으므로 OCR 안 함
                     }
                 }
-                else
+
+                // 2. 실패했거나 이미지 PDF면 OCR 실행
+                if (useOcr)
                 {
-                    var texts2 = await _ocrService.ExtractTextData(targetData, page);
-                    if (texts2.Count > 0) _activeDoc.PageTextData[page] = texts2;
+                    texts = await _ocrService.ExtractTextData(targetData, page);
+                }
+
+                if (texts.Count > 0)
+                {
+                    _activeDoc.PageTextData[page] = texts;
                 }
             }
         }
@@ -226,9 +222,7 @@ namespace SmartDocProcessor.WPF
         {
             if (_activeDoc == null || (_activeDoc.CleanPdfData == null && _activeDoc.PdfData == null)) return;
             
-            // [핵심] 렌더링 시작 플래그 설정 (스크롤 이벤트 무시)
             _isRendering = true;
-
             _renderCts?.Cancel();
             _renderCts = new CancellationTokenSource();
             var token = _renderCts.Token;
@@ -275,11 +269,7 @@ namespace SmartDocProcessor.WPF
                 }
             }
             catch (TaskCanceledException) { }
-            finally
-            {
-                // [핵심] 렌더링 종료 (스크롤 이벤트 재개)
-                _isRendering = false;
-            }
+            finally { _isRendering = false; }
         }
 
         private void RefreshPageCanvas(int pageIndex)

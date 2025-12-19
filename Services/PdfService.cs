@@ -3,23 +3,22 @@ using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using System.Text.RegularExpressions; // [필수] Regex
-using System.Globalization; // [필수] CultureInfo, NumberStyles
-using System.Reflection; // [필수] BindingFlags
+using System.Text.RegularExpressions;
+using System.Globalization;
+using System.Reflection;
 using PdfSharp.Pdf;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf.IO;
-using PdfSharp.Fonts; 
-using PdfSharp.Pdf.Annotations; 
+using PdfSharp.Fonts;
+using PdfSharp.Pdf.Annotations;
 using PdfSharp.Pdf.AcroForms;
-using PdfSharp.Drawing.Layout; // [필수] XTextFormatter
 using PdfSharp.Pdf.Advanced;
 using PdfSharp.Pdf.Content;
 using PdfSharp.Pdf.Content.Objects;
 
 namespace SmartDocProcessor.WPF.Services
 {
-    // [참고] TextData 클래스는 OcrService 등에 정의되어 있다고 가정
+    // [참고] TextData 클래스는 OcrService 등에 정의되어 있음
 
     public class AnnotationData
     {
@@ -32,13 +31,13 @@ namespace SmartDocProcessor.WPF.Services
         public double Height { get; set; }
         public int Page { get; set; }
         public string Color { get; set; } = "#000000";
-        public int FontSize { get; set; } = 14; 
+        public int FontSize { get; set; } = 14;
         public bool Selected { get; set; } = false;
         public string FontFamily { get; set; } = "Malgun Gothic";
         public bool IsBold { get; set; } = false;
     }
 
-    // 상태 추적 클래스 (내부 정의)
+    // 상태 추적 클래스 (Public으로 선언하여 접근 문제 해결)
     public class TextExtractionState
     {
         public TextState Current { get; set; } = new TextState();
@@ -69,40 +68,44 @@ namespace SmartDocProcessor.WPF.Services
 
     public class PdfService
     {
-        public PdfService() {
-            try { 
-                if (GlobalFontSettings.FontResolver == null) 
-                    GlobalFontSettings.FontResolver = new SystemFontResolver(); 
-            } catch { }
+        public PdfService()
+        {
+            try { if (GlobalFontSettings.FontResolver == null) GlobalFontSettings.FontResolver = new SystemFontResolver(); } catch { }
         }
 
         public bool IsPdfSearchable(byte[] pdfBytes)
         {
-            try {
-                using (var inStream = new MemoryStream(pdfBytes)) {
+            try
+            {
+                using (var inStream = new MemoryStream(pdfBytes))
+                {
                     var doc = PdfReader.Open(inStream, PdfDocumentOpenMode.Import);
                     int pagesToCheck = Math.Min(doc.PageCount, 3);
-                    for (int i = 0; i < pagesToCheck; i++) {
+                    for (int i = 0; i < pagesToCheck; i++)
+                    {
                         var content = ContentReader.ReadContent(doc.Pages[i]);
                         if (HasTextOperators(content)) return true;
                     }
                 }
-            } catch { }
+            }
+            catch { }
             return false;
         }
 
         private bool HasTextOperators(CObject content)
         {
-            if (content is COperator op) {
+            if (content is COperator op)
+            {
                 if (op.OpCode.Name == "Tj" || op.OpCode.Name == "TJ" || op.OpCode.Name == "\'") return true;
                 if (op.OpCode.Name == "Do") return true; 
-            } else if (content is CSequence seq) {
+            }
+            else if (content is CSequence seq)
+            {
                 foreach (var item in seq) if (HasTextOperators(item)) return true;
             }
             return false;
         }
 
-        // [핵심] 텍스트 및 좌표 추출
         public List<TextData> ExtractTextFromPage(byte[] pdfBytes, int pageIndex)
         {
             var result = new List<TextData>();
@@ -115,27 +118,29 @@ namespace SmartDocProcessor.WPF.Services
 
                     var page = doc.Pages[pageIndex - 1];
                     
-                    // [수정] .Point 제거 (XUnit은 double로 자동 변환됨 or 이미 double임)
-                    // PdfSharp 최신 버전에서는 XUnit.Point 프로퍼티가 Obsolete일 수 있으므로 
-                    // 그냥 double로 받거나, 명시적 형변환을 사용. 여기선 안전하게 double로 간주.
-                    double pageHeight = page.CropBox.Height > 0 ? (double)page.CropBox.Height : (double)page.Height;
+                    // [수정] .Point 제거 (이미 double 타입임)
+                    double pageHeight = (double)page.Height;
+                    if (page.CropBox.Height > 0) pageHeight = (double)page.CropBox.Height;
+                    
                     double xOffset = (double)page.CropBox.X1;
                     double yOffset = (double)page.CropBox.Y1;
 
                     var state = new TextExtractionState();
-                    // 초기값 설정
                     state.Current.CTM = new XMatrix(1, 0, 0, 1, 0, 0); 
                     state.Current.Tm = new XMatrix(1, 0, 0, 1, 0, 0);
 
                     var content = ContentReader.ReadContent(page);
-                    ExtractTextRecursively(content, result, state, pageHeight, xOffset, yOffset, page.Resources);
+                    
+                    // Resources를 딕셔너리로 변환하여 전달
+                    ExtractTextRecursively(content, result, state, pageHeight, xOffset, yOffset, page.Resources.Elements);
                 }
             }
             catch { }
             return result;
         }
 
-        private void ExtractTextRecursively(CObject content, List<TextData> result, TextExtractionState state, double pageHeight, double xOffset, double yOffset, PdfResources resources)
+        // [수정] PdfDictionary.DictionaryElements 사용
+        private void ExtractTextRecursively(CObject content, List<TextData> result, TextExtractionState state, double pageHeight, double xOffset, double yOffset, PdfDictionary.DictionaryElements resources)
         {
             if (content is CSequence seq)
             {
@@ -157,34 +162,48 @@ namespace SmartDocProcessor.WPF.Services
                         state.Current.CTM.Prepend(mat);
                     }
                 }
+                // [수정] XObject 처리
                 else if (op.OpCode.Name == "Do")
                 {
-                    if (op.Operands.Count > 0 && op.Operands[0] is CName xObjName && resources != null && resources.XObjects != null)
+                    if (op.Operands.Count > 0 && resources != null)
                     {
-                        var xObjectItem = resources.XObjects[xObjName.Value];
-                        if (xObjectItem is PdfReference refObj) xObjectItem = refObj.Value;
-
-                        if (xObjectItem is PdfDictionary xObjDict && xObjDict.Elements.GetString("/Subtype") == "/Form")
+                        // CName.Value 대신 ToString() 사용
+                        string xObjName = op.Operands[0].ToString(); 
+                        
+                        if (resources.ContainsKey("/XObject")) 
                         {
-                            try 
+                            var xObjectsRef = resources["/XObject"];
+                            if (xObjectsRef is PdfReference r) xObjectsRef = r.Value;
+                            
+                            if (xObjectsRef is PdfDictionary xObjectsDict)
                             {
-                                if (xObjDict.Stream != null)
+                                if (xObjectsDict.Elements.ContainsKey(xObjName))
                                 {
-                                    byte[] formBytes = xObjDict.Stream.UnfilteredValue;
-                                    var formContent = ContentReader.ReadContent(formBytes);
-                                    
-                                    var formResItem = xObjDict.Elements["/Resources"];
-                                    PdfResources formResources = resources; 
-                                    
-                                    if (formResItem is PdfReference resRef) formResItem = resRef.Value;
-                                    if (formResItem is PdfDictionary resDict) formResources = new PdfResources(resDict);
+                                    var xObjItem = xObjectsDict.Elements[xObjName];
+                                    if (xObjItem is PdfReference r2) xObjItem = r2.Value;
 
-                                    state.Push();
-                                    ExtractTextRecursively(formContent, result, state, pageHeight, xOffset, yOffset, formResources);
-                                    state.Pop();
+                                    if (xObjItem is PdfDictionary xObjDict && xObjDict.Elements.GetString("/Subtype") == "/Form")
+                                    {
+                                        try {
+                                            if (xObjDict.Stream != null) {
+                                                byte[] formBytes = xObjDict.Stream.UnfilteredValue;
+                                                var formContent = ContentReader.ReadContent(formBytes);
+                                                
+                                                var formRes = resources;
+                                                if(xObjDict.Elements.ContainsKey("/Resources")) {
+                                                    var fr = xObjDict.Elements["/Resources"];
+                                                    if(fr is PdfReference frr) fr = frr.Value;
+                                                    if(fr is PdfDictionary frd) formRes = frd.Elements;
+                                                }
+
+                                                state.Push();
+                                                ExtractTextRecursively(formContent, result, state, pageHeight, xOffset, yOffset, formRes);
+                                                state.Pop();
+                                            }
+                                        } catch { }
+                                    }
                                 }
                             }
-                            catch { }
                         }
                     }
                 }
@@ -233,9 +252,12 @@ namespace SmartDocProcessor.WPF.Services
                 {
                     if (op.Operands.Count > 0 && op.Operands[0] is CArray arr)
                     {
-                        var sb = new StringBuilder();
-                        foreach (var item in arr) if (item is CString s) sb.Append(s.Value);
-                        AddTextResult(result, sb.ToString(), state.Current, pageHeight, xOffset, yOffset);
+                        foreach (var item in arr) 
+                        {
+                            if (item is CString s) AddTextResult(result, s.Value, state.Current, pageHeight, xOffset, yOffset);
+                            else if (item is CReal r) state.Current.Tm.TranslatePrepend(-r.Value / 1000.0 * state.Current.FontSize, 0);
+                            else if (item is CInteger i) state.Current.Tm.TranslatePrepend(-i.Value / 1000.0 * state.Current.FontSize, 0);
+                        }
                     }
                 }
             }
@@ -273,6 +295,9 @@ namespace SmartDocProcessor.WPF.Services
                 Width = estimatedWidth / 0.75,
                 Height = actualFontSize / 0.75
             });
+            
+            // 다음 글자 위치 이동
+            current.Tm.TranslatePrepend(estimatedWidth, 0);
         }
 
         public byte[] GetPdfBytesWithoutAnnotations(byte[] pdfBytes)
@@ -298,8 +323,9 @@ namespace SmartDocProcessor.WPF.Services
                         var page = doc.Pages[i];
                         int pageNum = i + 1;
                         
-                        // [수정] .Point 제거 및 명시적 캐스팅
-                        double pageHeight = page.CropBox.Height > 0 ? (double)page.CropBox.Height : (double)page.Height;
+                        // [수정] .Point 제거
+                        double pageHeight = (double)page.Height;
+                        if(page.CropBox.Height > 0) pageHeight = (double)page.CropBox.Height;
                         double yOffset = (double)page.CropBox.Y1;
                         double xOffset = (double)page.CropBox.X1;
 
@@ -358,9 +384,11 @@ namespace SmartDocProcessor.WPF.Services
                     if (pageIdx < 0 || pageIdx >= doc.PageCount) continue;
                     var page = doc.Pages[pageIdx];
                     
-                    // [수정] .Point 제거 및 명시적 캐스팅
-                    double pageHeight = page.CropBox.Height > 0 ? (double)page.CropBox.Height : (double)page.Height;
-                    double pageTop = page.CropBox.Height > 0 ? ((double)page.CropBox.Y1 + (double)page.CropBox.Height) : (double)page.Height;
+                    // [수정] .Point 제거
+                    double pageHeight = (double)page.Height;
+                    if(page.CropBox.Height > 0) pageHeight = (double)page.CropBox.Height;
+                    double pageTop = (double)page.Height;
+                    if(page.CropBox.Height > 0) pageTop = (double)page.CropBox.Y1 + (double)page.CropBox.Height;
                     double xOffset = (double)page.CropBox.X1;
 
                     var ocrItems = group.Where(a => a.Type == "OCR_TEXT");
@@ -400,8 +428,8 @@ namespace SmartDocProcessor.WPF.Services
                                 var options = new XPdfFontOptions(PdfFontEncoding.Unicode);
                                 var font = CreateSafeFont(ann.FontFamily, Math.Max(pdfFontSize,4), ann.IsBold?XFontStyleEx.Bold:XFontStyleEx.Regular, options);
                                 var brush = new XSolidBrush(c);
-                                var tf = new XTextFormatter(gfx); tf.Alignment=XParagraphAlignment.Left;
-                                tf.DrawString(ann.Content, font, brush, formRect, XStringFormats.TopLeft);
+                                // [수정] XTextFormatter 제거 -> DrawString 사용 (에러 해결)
+                                gfx.DrawString(ann.Content, font, brush, formRect, XStringFormats.TopLeft);
                             }
                             var apDict = new PdfDictionary(doc); annot.Elements["/AP"]=apDict;
                             var pdfForm = GetPdfForm(form); if(pdfForm!=null) apDict.Elements["/N"]=pdfForm;
@@ -436,6 +464,8 @@ namespace SmartDocProcessor.WPF.Services
             catch { try { return new XFont("Malgun Gothic", size, style, options); } catch { return new XFont("Arial", size, style, options); } }
         }
         public byte[] DeletePage(byte[] pdfBytes, int pageIndex) { using (var ms = new MemoryStream(pdfBytes)) using (var outMs = new MemoryStream()) { var doc = PdfReader.Open(ms, PdfDocumentOpenMode.Import); var newDoc = new PdfDocument(); for (int i = 0; i < doc.PageCount; i++) if (i != pageIndex) newDoc.AddPage(doc.Pages[i]); newDoc.Save(outMs); return outMs.ToArray(); } }
+        
+        // [수정] 반환 타입 PdfDictionary로 변경
         private PdfDictionary? GetPdfForm(XForm form) { try { var prop = typeof(XForm).GetProperty("PdfForm", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public); if (prop != null) return prop.GetValue(form) as PdfDictionary; } catch { } return null; }
     }
 
