@@ -2,11 +2,10 @@ using System;
 using System.IO;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.Json;
-using System.Reflection; 
 using System.Text.RegularExpressions;
 using System.Globalization; 
-using System.Text; // StringBuilder
+using System.Text; 
+using System.Reflection; 
 using PdfSharp.Pdf;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf.IO;
@@ -20,15 +19,7 @@ using PdfSharp.Pdf.Content.Objects;
 
 namespace SmartDocProcessor.WPF.Services
 {
-    // 텍스트 추출 데이터용 클래스
-    public class TextData
-    {
-        public string Text { get; set; } = "";
-        public double X { get; set; }
-        public double Y { get; set; }
-        public double Width { get; set; }
-        public double Height { get; set; }
-    }
+    // TextData는 OcrService에 정의됨 (중복 방지)
 
     public class AnnotationData
     {
@@ -81,7 +72,7 @@ namespace SmartDocProcessor.WPF.Services
             return false;
         }
 
-        // [신규] Searchable PDF에서 텍스트 추출 (좌표 포함)
+        // Searchable PDF에서 텍스트 + 좌표 추출 (Matrix 적용)
         public List<TextData> ExtractTextFromPage(byte[] pdfBytes, int pageIndex)
         {
             var result = new List<TextData>();
@@ -95,32 +86,77 @@ namespace SmartDocProcessor.WPF.Services
                     var page = doc.Pages[pageIndex - 1];
                     var content = ContentReader.ReadContent(page);
                     
-                    // 간단한 텍스트 추출 (좌표는 추정치 사용)
-                    // PDFSharp은 텍스트 추출 전용 라이브러리가 아니라서 좌표가 정확하지 않을 수 있음.
-                    // 실제 상용급에서는 PDFium이나 iText를 써야 하지만, 여기서는 기본 기능으로 구현.
-                    ExtractTextRecursively(content, result, page);
+                    double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height.Point;
+                    double yOffset = page.CropBox.Y1;
+                    double xOffset = page.CropBox.X1;
+
+                    var state = new TextExtractionState();
+                    state.CTM = new XMatrix(1, 0, 0, 1, 0, 0); 
+                    state.Tm = new XMatrix(1, 0, 0, 1, 0, 0);
+
+                    ExtractTextRecursively(content, result, state, pageHeight, xOffset, yOffset);
                 }
             }
             catch { }
             return result;
         }
 
-        private void ExtractTextRecursively(CObject content, List<TextData> result, PdfPage page)
+        private void ExtractTextRecursively(CObject content, List<TextData> result, TextExtractionState state, double pageHeight, double xOffset, double yOffset)
         {
             if (content is CSequence seq)
             {
-                foreach (var item in seq) ExtractTextRecursively(item, result, page);
+                foreach (var item in seq) ExtractTextRecursively(item, result, state, pageHeight, xOffset, yOffset);
             }
             else if (content is COperator op)
             {
-                if (op.OpCode.Name == "Tj" || op.OpCode.Name == "\'")
+                if (op.OpCode.Name == "cm") 
+                {
+                    if (op.Operands.Count >= 6)
+                    {
+                        var mat = new XMatrix(
+                            GetOperandValue(op.Operands[0]), GetOperandValue(op.Operands[1]),
+                            GetOperandValue(op.Operands[2]), GetOperandValue(op.Operands[3]),
+                            GetOperandValue(op.Operands[4]), GetOperandValue(op.Operands[5])
+                        );
+                        state.CTM.Prepend(mat); 
+                    }
+                }
+                else if (op.OpCode.Name == "BT") 
+                {
+                    state.Tm = new XMatrix(1, 0, 0, 1, 0, 0); 
+                }
+                else if (op.OpCode.Name == "Tf") 
+                {
+                    if (op.Operands.Count >= 2) state.FontSize = GetOperandValue(op.Operands[1]);
+                }
+                else if (op.OpCode.Name == "Tm") 
+                {
+                    if (op.Operands.Count >= 6)
+                    {
+                        state.Tm = new XMatrix(
+                            GetOperandValue(op.Operands[0]), GetOperandValue(op.Operands[1]),
+                            GetOperandValue(op.Operands[2]), GetOperandValue(op.Operands[3]),
+                            GetOperandValue(op.Operands[4]), GetOperandValue(op.Operands[5])
+                        );
+                    }
+                }
+                else if (op.OpCode.Name == "Td" || op.OpCode.Name == "TD") 
+                {
+                    if (op.Operands.Count >= 2)
+                    {
+                        double tx = GetOperandValue(op.Operands[0]);
+                        double ty = GetOperandValue(op.Operands[1]);
+                        state.Tm.TranslatePrepend(tx, ty); 
+                    }
+                }
+                else if (op.OpCode.Name == "T*") 
+                {
+                    state.Tm.TranslatePrepend(0, -state.FontSize * 1.2); 
+                }
+                else if (op.OpCode.Name == "Tj" || op.OpCode.Name == "\'")
                 {
                     if (op.Operands.Count > 0 && op.Operands[0] is CString cStr)
-                    {
-                        // 좌표를 정확히 알기 어려우므로 페이지 전체 텍스트로 간주하거나 임의 처리
-                        // 여기서는 검색 가능성만 열어두기 위해 더미 좌표 사용 (필요시 개선)
-                        result.Add(new TextData { Text = cStr.Value, X = 0, Y = 0, Width = 0, Height = 0 });
-                    }
+                        AddTextResult(result, cStr.Value, state, pageHeight, xOffset, yOffset);
                 }
                 else if (op.OpCode.Name == "TJ")
                 {
@@ -128,10 +164,44 @@ namespace SmartDocProcessor.WPF.Services
                     {
                         var sb = new StringBuilder();
                         foreach (var item in arr) if (item is CString s) sb.Append(s.Value);
-                        result.Add(new TextData { Text = sb.ToString(), X = 0, Y = 0, Width = 0, Height = 0 });
+                        AddTextResult(result, sb.ToString(), state, pageHeight, xOffset, yOffset);
                     }
                 }
             }
+        }
+
+        private double GetOperandValue(CObject obj)
+        {
+            if (obj is CReal r) return r.Value;
+            if (obj is CInteger i) return i.Value;
+            return 0;
+        }
+
+        private void AddTextResult(List<TextData> result, string text, TextExtractionState state, double pageHeight, double xOffset, double yOffset)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return;
+
+            var finalMat = state.Tm * state.CTM;
+            
+            double pdfX = finalMat.OffsetX;
+            double pdfY = finalMat.OffsetY;
+
+            double wpfX = pdfX - xOffset;
+            double wpfY = (pageHeight - (pdfY - yOffset)) - state.FontSize; 
+
+            double scaleY = Math.Sqrt(finalMat.M21 * finalMat.M21 + finalMat.M22 * finalMat.M22);
+            double actualFontSize = state.FontSize * scaleY;
+            double estimatedWidth = text.Length * (actualFontSize * 0.5); 
+            double estimatedHeight = actualFontSize;
+
+            result.Add(new TextData 
+            { 
+                Text = text, 
+                X = wpfX / 0.75, 
+                Y = wpfY / 0.75, 
+                Width = estimatedWidth / 0.75, 
+                Height = estimatedHeight / 0.75 
+            });
         }
 
         public byte[] GetPdfBytesWithoutAnnotations(byte[] pdfBytes)
@@ -157,7 +227,7 @@ namespace SmartDocProcessor.WPF.Services
                         var page = doc.Pages[i];
                         int pageNum = i + 1;
                         
-                        double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height;
+                        double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height.Point;
                         double yOffset = page.CropBox.Y1;
                         double xOffset = page.CropBox.X1;
 
@@ -169,7 +239,6 @@ namespace SmartDocProcessor.WPF.Services
                                     
                                     double appY = (pageHeight + yOffset) - rect.Y2;
                                     double appX = rect.X1 - xOffset;
-
                                     double scaledX = appX / 0.75;
                                     double scaledY = appY / 0.75;
                                     double scaledW = rect.Width / 0.75;
@@ -201,7 +270,6 @@ namespace SmartDocProcessor.WPF.Services
                 if (fontMatch.Success && double.TryParse(fontMatch.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out double size)) {
                     data.FontSize = (int)Math.Round(size / 0.75);
                 }
-                
                 var rgbMatch = Regex.Match(da, @"([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)\s+rg");
                 if (rgbMatch.Success) {
                     double r = double.Parse(rgbMatch.Groups[1].Value, CultureInfo.InvariantCulture);
@@ -231,8 +299,8 @@ namespace SmartDocProcessor.WPF.Services
                     if (pageIdx < 0 || pageIdx >= doc.PageCount) continue;
                     var page = doc.Pages[pageIdx];
                     
-                    double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height;
-                    double pageTop = page.CropBox.Height > 0 ? (page.CropBox.Y1 + page.CropBox.Height) : page.Height;
+                    double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height.Point;
+                    double pageTop = page.CropBox.Height > 0 ? (page.CropBox.Y1 + page.CropBox.Height) : page.Height.Point;
                     double xOffset = page.CropBox.X1;
 
                     var ocrItems = group.Where(a => a.Type == "OCR_TEXT");
@@ -282,6 +350,9 @@ namespace SmartDocProcessor.WPF.Services
 
                             annot.Elements["/DA"] = new PdfString($"/Helv {pdfFontSize:0.##} Tf {r.ToString("0.###", CultureInfo.InvariantCulture)} {g.ToString("0.###", CultureInfo.InvariantCulture)} {b.ToString("0.###", CultureInfo.InvariantCulture)} rg");
 
+                            if (scaledW < 1) scaledW = 1;
+                            if (scaledH < 1) scaledH = 1;
+
                             var formRect = new XRect(0, 0, scaledW, scaledH);
                             var form = new XForm(doc, formRect);
                             using (var gfx = XGraphics.FromForm(form))
@@ -313,7 +384,6 @@ namespace SmartDocProcessor.WPF.Services
                                 annot.Elements["/C"] = new PdfArray(doc, new PdfReal(1), new PdfReal(0), new PdfReal(0));
                             }
 
-                            // QuadPoints
                             double x = pdfLeftX;
                             double y_bottom = pdfBottomY;
                             double y_top = pdfTopY;
@@ -344,9 +414,10 @@ namespace SmartDocProcessor.WPF.Services
 
         public byte[] DeletePage(byte[] pdfBytes, int pageIndex) { using (var ms = new MemoryStream(pdfBytes)) using (var outMs = new MemoryStream()) { var doc = PdfReader.Open(ms, PdfDocumentOpenMode.Import); var newDoc = new PdfDocument(); for (int i = 0; i < doc.PageCount; i++) if (i != pageIndex) newDoc.AddPage(doc.Pages[i]); newDoc.Save(outMs); return outMs.ToArray(); } }
 
-        private PdfFormXObject? GetPdfForm(XForm form)
+        // [수정] 반환 타입을 PdfDictionary로 변경 (internal class 에러 해결)
+        private PdfDictionary? GetPdfForm(XForm form)
         {
-            try { var prop = typeof(XForm).GetProperty("PdfForm", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public); if (prop != null) return prop.GetValue(form) as PdfFormXObject; } catch { }
+            try { var prop = typeof(XForm).GetProperty("PdfForm", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public); if (prop != null) return prop.GetValue(form) as PdfDictionary; } catch { }
             return null;
         }
     }
@@ -354,5 +425,23 @@ namespace SmartDocProcessor.WPF.Services
     public class CustomPdfAnnotation : PdfAnnotation
     {
         public CustomPdfAnnotation(PdfDocument document) : base(document) { }
+    }
+    
+    // TextExtractionState는 PdfService 내부에서만 사용되므로 여기에 정의
+    public class TextExtractionState
+    {
+        public XMatrix CTM { get; set; } = new XMatrix();
+        public XMatrix Tm { get; set; } = new XMatrix(); 
+        public double FontSize { get; set; } = 10;
+        
+        public TextExtractionState Clone()
+        {
+            return new TextExtractionState
+            {
+                CTM = this.CTM,
+                Tm = this.Tm,
+                FontSize = this.FontSize
+            };
+        }
     }
 }

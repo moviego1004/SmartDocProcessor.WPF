@@ -33,9 +33,7 @@ namespace SmartDocProcessor.WPF
         private ObservableCollection<PdfDocumentModel> _documents = new ObservableCollection<PdfDocumentModel>();
         private PdfDocumentModel? _activeDoc = null; 
 
-        // [신규] 렌더링 취소 토큰
         private CancellationTokenSource? _renderCts;
-
         private List<SearchResultItem> _searchResults = new List<SearchResultItem>();
         private int _currentSearchIndex = -1;
         private CancellationTokenSource? _searchCts;
@@ -55,7 +53,6 @@ namespace SmartDocProcessor.WPF
         private List<TextData> _selectedTextData = new List<TextData>();
 
         private const double RENDER_SCALE = 1.5; 
-        private double _zoomLevel = 1.0;
         private bool _isUpdatingUi = false;
 
         public MainWindow()
@@ -83,6 +80,7 @@ namespace SmartDocProcessor.WPF
                         var newDoc = new PdfDocumentModel
                         {
                             FilePath = file,
+                            OriginalPdfData = data,
                             PdfData = data,
                             CleanPdfData = _pdfService.GetPdfBytesWithoutAnnotations(data),
                             Annotations = _pdfService.ExtractAnnotationsFromMetadata(data)
@@ -102,9 +100,22 @@ namespace SmartDocProcessor.WPF
 
         private async void TabList_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
+            if (e.RemovedItems.Count > 0 && e.RemovedItems[0] is PdfDocumentModel oldDoc)
+            {
+                if (_activeDoc == oldDoc)
+                {
+                    oldDoc.VerticalOffset = MainScrollViewer.VerticalOffset;
+                    oldDoc.HorizontalOffset = MainScrollViewer.HorizontalOffset;
+                }
+            }
+
             if (e.AddedItems.Count > 0 && e.AddedItems[0] is PdfDocumentModel selectedDoc)
             {
                 await SwitchTab(selectedDoc);
+            }
+            else if (TabList.SelectedItem is PdfDocumentModel currentDoc)
+            {
+                await SwitchTab(currentDoc);
             }
             else if (TabList.Items.Count == 0)
             {
@@ -120,7 +131,6 @@ namespace SmartDocProcessor.WPF
         {
             if (_activeDoc == doc) return;
 
-            // [핵심] 이전 렌더링/검색 취소
             _renderCts?.Cancel();
             CancelSearch();
 
@@ -132,10 +142,18 @@ namespace SmartDocProcessor.WPF
             TxtPageInfo.Text = $"총 {_activeDoc.TotalPages} 페이지";
             TxtZoom.Text = $"{Math.Round(_activeDoc.ZoomLevel * 100)}%";
             
-            // 새 렌더링 시작
             await RenderDocument();
 
-            if (_activeDoc.PdfData != null && _pdfService.IsPdfSearchable(_activeDoc.PdfData))
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                if (_activeDoc == doc)
+                {
+                    MainScrollViewer.ScrollToVerticalOffset(_activeDoc.VerticalOffset);
+                    MainScrollViewer.ScrollToHorizontalOffset(_activeDoc.HorizontalOffset);
+                }
+            }, System.Windows.Threading.DispatcherPriority.Loaded);
+
+            if (_activeDoc.OriginalPdfData != null)
             {
                 await LoadTextDataForPage(_activeDoc.CurrentPage);
             }
@@ -147,21 +165,61 @@ namespace SmartDocProcessor.WPF
         {
             if (sender is Button btn && btn.Tag is PdfDocumentModel docToClose)
             {
+                bool isCurrent = (docToClose == _activeDoc);
                 _documents.Remove(docToClose);
+                
+                if (_documents.Count == 0)
+                {
+                    _activeDoc = null;
+                    DocumentContainer.Children.Clear();
+                    TxtPageInfo.Text = "문서 없음";
+                    CloseSearchBar();
+                    UpdatePropertyPanel();
+                }
+                else if (isCurrent)
+                {
+                    TabList.SelectedItem = _documents.Last();
+                }
             }
         }
 
-        // [핵심] 렌더링 취소 로직 적용
+        // [핵심] 1. 기본 추출(ExtractTextFromPage) 시도 -> 2. 실패 시 OCR
+        private async Task LoadTextDataForPage(int page)
+        {
+            if (_activeDoc == null || _activeDoc.OriginalPdfData == null) return;
+            if (!_activeDoc.PageTextData.ContainsKey(page))
+            {
+                byte[] targetData = _activeDoc.OriginalPdfData;
+                
+                // 1. Searchable PDF 텍스트 추출 (Matrix 적용된 향상된 추출)
+                var texts = _pdfService.ExtractTextFromPage(targetData, page);
+                
+                // 좌표가 유효한지 확인 (Width > 0 등)
+                // Matrix 처리가 추가되어 이제 Searchable PDF도 정확한 좌표가 반환됨
+                bool isValid = texts.Count > 0 && texts.Any(t => t.Width > 0 && t.Height > 0);
+
+                if (isValid)
+                {
+                    _activeDoc.PageTextData[page] = texts;
+                }
+                else
+                {
+                    // 2. 실패 시(이미지 PDF) OCR 실행
+                    var ocrTexts = await _ocrService.ExtractTextData(targetData, page);
+                    if (ocrTexts.Count > 0) _activeDoc.PageTextData[page] = ocrTexts;
+                }
+            }
+        }
+
         private async System.Threading.Tasks.Task RenderDocument()
         {
             if (_activeDoc == null || (_activeDoc.CleanPdfData == null && _activeDoc.PdfData == null)) return;
             
-            // 이전 작업 취소
             _renderCts?.Cancel();
             _renderCts = new CancellationTokenSource();
             var token = _renderCts.Token;
 
-            var docToRender = _activeDoc; // 로컬 변수 캡처
+            var docToRender = _activeDoc; 
             var dataToRender = docToRender.CleanPdfData ?? docToRender.PdfData;
             
             DocumentContainer.Children.Clear();
@@ -176,6 +234,7 @@ namespace SmartDocProcessor.WPF
 
                     var bitmap = await PdfRenderer.RenderPageToBitmapAsync(dataToRender!, i);
                     if (bitmap == null) continue;
+                    
                     if (token.IsCancellationRequested) return;
 
                     var pageGrid = new Grid { Margin = new Thickness(0, 0, 0, 20) };
@@ -196,11 +255,8 @@ namespace SmartDocProcessor.WPF
                     canvas.MouseUp += Canvas_MouseUp;
 
                     pageGrid.Children.Add(canvas);
-                    // 그리기 로직 호출 (이 시점에 _activeDoc가 바뀌었는지 체크)
-                    if (_activeDoc == docToRender)
-                    {
-                        DrawAnnotationsForPage(i, canvas);
-                    }
+                    if (_activeDoc == docToRender) DrawAnnotationsForPage(i, canvas);
+                    
                     DocumentContainer.Children.Add(pageGrid);
                 }
             }
@@ -222,7 +278,6 @@ namespace SmartDocProcessor.WPF
             if (_activeDoc == null) return;
             canvas.Children.Clear();
 
-            // 검색 결과
             if (_searchResults.Count > 0)
             {
                 var pageResults = _searchResults.Where(r => r.Page == pageIndex).ToList();
@@ -243,7 +298,6 @@ namespace SmartDocProcessor.WPF
                 }
             }
 
-            // 주석
             var pageAnns = _activeDoc.Annotations.Where(a => a.Page == pageIndex).ToList();
             foreach (var ann in pageAnns)
             {
@@ -255,15 +309,11 @@ namespace SmartDocProcessor.WPF
                 {
                     var tb = new TextBox
                     {
-                        Text = ann.Content,
-                        FontSize = ann.FontSize * RENDER_SCALE,
+                        Text = ann.Content, FontSize = ann.FontSize * RENDER_SCALE,
                         Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(ann.Color)),
-                        FontFamily = new FontFamily(ann.FontFamily),
-                        FontWeight = ann.IsBold ? FontWeights.Bold : FontWeights.Normal,
-                        Width = w, MinHeight = Math.Max(h, 20),
-                        AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
-                        Background = Brushes.Transparent, BorderThickness = new Thickness(0),
-                        Padding = new Thickness(0), VerticalContentAlignment = VerticalAlignment.Top
+                        FontFamily = new FontFamily(ann.FontFamily), FontWeight = ann.IsBold ? FontWeights.Bold : FontWeights.Normal,
+                        Width = w, MinHeight = Math.Max(h, 20), AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+                        Background = Brushes.Transparent, BorderThickness = new Thickness(0), Padding = new Thickness(0), VerticalContentAlignment = VerticalAlignment.Top
                     };
                     tb.TextChanged += (s, args) => { ann.Content = tb.Text; if (tb.ActualHeight > 0) ann.Height = tb.ActualHeight / RENDER_SCALE; };
                     tb.SizeChanged += (s, args) => { if (args.NewSize.Height > 0) ann.Height = args.NewSize.Height / RENDER_SCALE; };
@@ -291,7 +341,6 @@ namespace SmartDocProcessor.WPF
                         Canvas.SetLeft(border, x - 3); Canvas.SetTop(border, y - 3);
                         border.MouseLeftButtonDown += (s, e) => { e.Handled = true; SelectAnnotation(ann); _isDraggingAnnot = true; _dragStartPoint = e.GetPosition(canvas); _annotStartPos = new Point(ann.X, ann.Y); _currentDrawingCanvas = canvas; canvas.CaptureMouse(); };
                         canvas.Children.Add(border); 
-
                         if (ann.Type == "TEXT") {
                             var handle = new Rectangle { Width = 10, Height = 10, Fill = Brushes.Red, Cursor = Cursors.SizeNWSE };
                             double actualW = Math.Max(w, element.ActualWidth); double actualH = Math.Max(h, element.ActualHeight);
@@ -305,45 +354,6 @@ namespace SmartDocProcessor.WPF
             }
         }
 
-        // [수정] Searchable PDF 텍스트 추출 + OCR 분기 처리
-        private async Task LoadTextDataForPage(int page)
-        {
-            if (_activeDoc == null || _activeDoc.PdfData == null) return;
-            if (!_activeDoc.PageTextData.ContainsKey(page))
-            {
-                // Searchable 여부 확인
-                if (_pdfService.IsPdfSearchable(_activeDoc.PdfData))
-                {
-                    // 1. PDFSharp으로 텍스트 추출 시도
-                    var texts = _pdfService.ExtractTextFromPage(_activeDoc.PdfData, page);
-                    if (texts.Count > 0) 
-                    {
-                        _activeDoc.PageTextData[page] = texts;
-                    }
-                    else
-                    {
-                        // 2. 추출 실패 시(이미지 PDF인 경우) OCR 시도
-                        var ocrTexts = await _ocrService.ExtractTextData(_activeDoc.PdfData, page);
-                        if (ocrTexts.Count > 0) _activeDoc.PageTextData[page] = ocrTexts;
-                    }
-                }
-                else
-                {
-                    // 3. Not Searchable -> OCR
-                    var texts = await _ocrService.ExtractTextData(_activeDoc.PdfData, page);
-                    if (texts.Count > 0) _activeDoc.PageTextData[page] = texts;
-                }
-            }
-        }
-
-        private async Task SearchPageAsync(int page, string query)
-        {
-            if (_activeDoc == null) return;
-            await LoadTextDataForPage(page); // 통합된 메서드 호출
-            SearchPageInMemory(page, query);
-        }
-
-        // --- 기타 UI 이벤트 ---
         private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
         {
             if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control) { e.Handled = true; OpenSearchBar(); }
@@ -366,35 +376,53 @@ namespace SmartDocProcessor.WPF
             if (_activeDoc == null) return; string query = TxtSearchQuery.Text.Trim(); if (string.IsNullOrEmpty(query)) return;
             CancelSearch(); _searchCts = new CancellationTokenSource(); var token = _searchCts.Token;
             _searchResults.Clear(); _currentSearchIndex = -1; TxtSearchCount.Text = "검색중..";
-            
             await SearchPageAsync(_activeDoc.CurrentPage, query);
             if (_searchResults.Count > 0) { _currentSearchIndex = 0; HighlightCurrentSearchResult(); }
-
-            var activeDocRef = _activeDoc; // 검색 도중 탭 전환 대비 참조 캡처
+            var activeDocRef = _activeDoc;
             _ = Task.Run(async () => {
                 var pageOrder = Enumerable.Range(activeDocRef.CurrentPage + 1, activeDocRef.TotalPages - activeDocRef.CurrentPage).Concat(Enumerable.Range(1, activeDocRef.CurrentPage - 1));
                 foreach (int page in pageOrder) {
                     if (token.IsCancellationRequested) break;
-                    // 백그라운드에서는 텍스트 로드만 수행 (SearchPageAsync 로직의 일부)
                     bool hasData = activeDocRef.PageTextData.ContainsKey(page);
-                    if (!hasData) {
-                        // 백그라운드 스레드에서 Extract 호출 불가할 수 있으므로 UI 스레드 사용
-                        await Dispatcher.InvokeAsync(async () => {
-                            if (activeDocRef == _activeDoc) await LoadTextDataForPage(page); 
-                        });
-                    }
-                    await Dispatcher.InvokeAsync(() => {
-                        if (token.IsCancellationRequested || activeDocRef != _activeDoc) return; // 탭 바뀌었으면 중단
-                        SearchPageInMemory(page, query);
-                        if (_searchResults.Count > 0 && _currentSearchIndex == -1) { _currentSearchIndex = 0; HighlightCurrentSearchResult(); } else UpdateSearchCountText();
-                    });
+                    if (!hasData) { await Dispatcher.InvokeAsync(async () => { if (activeDocRef == _activeDoc) await LoadTextDataForPage(page); }); }
+                    await Dispatcher.InvokeAsync(() => { if (token.IsCancellationRequested || activeDocRef != _activeDoc) return; SearchPageInMemory(page, query); if (_searchResults.Count > 0 && _currentSearchIndex == -1) { _currentSearchIndex = 0; HighlightCurrentSearchResult(); } else UpdateSearchCountText(); });
                 }
                 await Dispatcher.InvokeAsync(() => { if (!token.IsCancellationRequested) { if (_searchResults.Count == 0) MessageBox.Show("검색 결과가 없습니다."); else UpdateSearchCountText(); } });
             }, token);
         }
 
         private void SearchPageInMemory(int page, string query) { if (_activeDoc == null || !_activeDoc.PageTextData.ContainsKey(page)) return; bool foundAny = false; foreach (var item in _activeDoc.PageTextData[page]) { if (item.Text.Contains(query, StringComparison.OrdinalIgnoreCase)) { _searchResults.Add(new SearchResultItem { Page = page, Rect = new Rect(item.X, item.Y, item.Width, item.Height), Text = query }); foundAny = true; } } if (foundAny) _searchResults = _searchResults.OrderBy(r => r.Page).ThenBy(r => r.Rect.Y).ToList(); }
-        private void HighlightCurrentSearchResult() { if (_searchResults.Count == 0) return; if (_currentSearchIndex < 0) _currentSearchIndex = 0; if (_currentSearchIndex >= _searchResults.Count) _currentSearchIndex = 0; var result = _searchResults[_currentSearchIndex]; UpdateSearchCountText(); if (_activeDoc != null && _activeDoc.CurrentPage != result.Page) { _activeDoc.CurrentPage = result.Page; if (DocumentContainer.Children.Count >= _activeDoc.CurrentPage) { var pageGrid = DocumentContainer.Children[_activeDoc.CurrentPage - 1] as FrameworkElement; pageGrid?.BringIntoView(); } } RefreshPageCanvas(_activeDoc?.CurrentPage ?? 1); }
+        private async Task SearchPageAsync(int page, string query) { if (_activeDoc == null) return; await LoadTextDataForPage(page); SearchPageInMemory(page, query); }
+        
+        private void HighlightCurrentSearchResult()
+        {
+            if (_searchResults.Count == 0) return;
+            if (_currentSearchIndex < 0) _currentSearchIndex = 0;
+            if (_currentSearchIndex >= _searchResults.Count) _currentSearchIndex = 0;
+
+            var result = _searchResults[_currentSearchIndex];
+            UpdateSearchCountText();
+
+            if (_activeDoc != null)
+            {
+                if (_activeDoc.CurrentPage != result.Page)
+                {
+                    _activeDoc.CurrentPage = result.Page;
+                }
+
+                if (DocumentContainer.Children.Count >= _activeDoc.CurrentPage)
+                {
+                    var pageGrid = DocumentContainer.Children[_activeDoc.CurrentPage - 1] as FrameworkElement;
+                    if (pageGrid != null)
+                    {
+                        Rect targetRect = new Rect(result.Rect.X * RENDER_SCALE, result.Rect.Y * RENDER_SCALE, result.Rect.Width * RENDER_SCALE, result.Rect.Height * RENDER_SCALE);
+                        pageGrid.BringIntoView(targetRect);
+                    }
+                }
+            }
+            RefreshPageCanvas(_activeDoc?.CurrentPage ?? 1);
+        }
+
         private void UpdateSearchCountText() => TxtSearchCount.Text = _searchResults.Count > 0 ? $"{_currentSearchIndex + 1}/{_searchResults.Count}" : "0/0";
 
         private async void BtnOcr_Click(object sender, RoutedEventArgs e)
@@ -417,7 +445,6 @@ namespace SmartDocProcessor.WPF
             if (_activeDoc == null || sender is not Canvas canvas) return;
             if (canvas.Tag is int pageNum) { 
                 _activeDoc.CurrentPage = pageNum;
-                // 클릭 시 데이터 로드 (드래그 준비)
                 if (!_activeDoc.PageTextData.ContainsKey(pageNum)) { _ = LoadTextDataForPage(pageNum); }
             }
             _dragStartPoint = e.GetPosition(canvas);
@@ -470,71 +497,5 @@ namespace SmartDocProcessor.WPF
         private void CboPropFontFamily_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (_selectedAnnotation == null || _isUpdatingUi) return; if (CboPropFontFamily.SelectedItem is ComboBoxItem item && item.Tag != null) { _selectedAnnotation.FontFamily = item.Tag.ToString() ?? "Malgun Gothic"; _userSettings.DefaultFontFamily = _selectedAnnotation.FontFamily; _userSettings.Save(); RefreshPageCanvas(_selectedAnnotation.Page); } }
         private void CboPropColor_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (_selectedAnnotation == null || _isUpdatingUi) return; if (CboPropColor.SelectedItem is ComboBoxItem item && item.Tag != null) { _selectedAnnotation.Color = item.Tag.ToString() ?? "#FF000000"; _userSettings.DefaultColor = _selectedAnnotation.Color; _userSettings.Save(); RefreshPageCanvas(_selectedAnnotation.Page); } }
         private void ChkPropBold_Click(object sender, RoutedEventArgs e) { if (_selectedAnnotation == null || _isUpdatingUi) return; _selectedAnnotation.IsBold = ChkPropBold.IsChecked == true; _userSettings.DefaultIsBold = _selectedAnnotation.IsBold; _userSettings.Save(); RefreshPageCanvas(_selectedAnnotation.Page); }
-        private void ScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e) { if (Keyboard.Modifiers == ModifierKeys.Control && _activeDoc != null) { e.Handled = true; if (e.Delta > 0) _activeDoc.ZoomLevel += 0.1; else _activeDoc.ZoomLevel -= 0.1; _activeDoc.ZoomLevel = Math.Clamp(_activeDoc.ZoomLevel, 0.2, 5.0); ApplyZoom(); } }
-        private void ApplyZoom() { if(_activeDoc == null) return; DocScaleTransform.ScaleX = _activeDoc.ZoomLevel; DocScaleTransform.ScaleY = _activeDoc.ZoomLevel; TxtZoom.Text = $"{Math.Round(_activeDoc.ZoomLevel * 100)}%"; }
-        private void BtnFitWidth_Click(object sender, RoutedEventArgs e) { if (DocumentContainer.Children.Count == 0 || _activeDoc == null) return; int targetIndex = Math.Clamp(_activeDoc.CurrentPage - 1, 0, DocumentContainer.Children.Count - 1); if (DocumentContainer.Children[targetIndex] is Grid pageGrid && pageGrid.Width > 0) { double availableWidth = MainScrollViewer.ViewportWidth - 40; if (availableWidth > 0) { _activeDoc.ZoomLevel = availableWidth / pageGrid.Width; _activeDoc.ZoomLevel = Math.Clamp(_activeDoc.ZoomLevel, 0.2, 5.0); ApplyZoom(); } } }
-        private void BtnFitHeight_Click(object sender, RoutedEventArgs e) { if (DocumentContainer.Children.Count == 0 || _activeDoc == null) return; int targetIndex = Math.Clamp(_activeDoc.CurrentPage - 1, 0, DocumentContainer.Children.Count - 1); if (DocumentContainer.Children[targetIndex] is Grid pageGrid && pageGrid.Height > 0) { double availableHeight = MainScrollViewer.ViewportHeight - 40; if (availableHeight > 0) { _activeDoc.ZoomLevel = availableHeight / pageGrid.Height; _activeDoc.ZoomLevel = Math.Clamp(_activeDoc.ZoomLevel, 0.2, 5.0); ApplyZoom(); } } }
-        private void BtnUndo_Click(object sender, RoutedEventArgs e) { }
-
-        private List<AnnotationData> PrepareAnnotationsForSave()
-        {
-            if (_activeDoc == null) return new List<AnnotationData>();
-            var allAnns = new List<AnnotationData>(_activeDoc.Annotations);
-            foreach (var kvp in _activeDoc.PageTextData)
-            {
-                int pageNum = kvp.Key;
-                foreach (var textData in kvp.Value)
-                {
-                    allAnns.Add(new AnnotationData { Type = "OCR_TEXT", Content = textData.Text, X = textData.X, Y = textData.Y, Width = textData.Width, Height = textData.Height, Page = pageNum, FontSize = 10 });
-                }
-            }
-            return allAnns;
-        }
-
-        private async void BtnDeletePage_Click(object sender, RoutedEventArgs e)
-        {
-            if (_activeDoc == null) return;
-            int targetPage = _selectedAnnotation?.Page ?? _activeDoc.CurrentPage;
-            if (_activeDoc.TotalPages <= 1 || _activeDoc.PdfData == null) return;
-            _activeDoc.PdfData = _pdfService.DeletePage(_activeDoc.PdfData, targetPage - 1);
-            _activeDoc.CleanPdfData = _pdfService.GetPdfBytesWithoutAnnotations(_activeDoc.PdfData);
-            _activeDoc.Annotations.RemoveAll(a => a.Page == targetPage);
-            foreach (var ann in _activeDoc.Annotations.Where(a => a.Page > targetPage)) ann.Page--;
-            using (var doc = PdfSharp.Pdf.IO.PdfReader.Open(new MemoryStream(_activeDoc.PdfData), PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import)) { _activeDoc.TotalPages = doc.PageCount; }
-            TxtPageInfo.Text = $"총 {_activeDoc.TotalPages} 페이지";
-            await RenderDocument();
-        }
-
-        private void BtnSave_Click(object sender, RoutedEventArgs e)
-        {
-            if (_activeDoc == null || _activeDoc.PdfData == null) return;
-            try
-            {
-                var allAnns = PrepareAnnotationsForSave();
-                var resultBytes = _pdfService.SavePdfWithAnnotations(_activeDoc.PdfData, allAnns, _activeDoc.ZoomLevel);
-                File.WriteAllBytes(_activeDoc.FilePath, resultBytes);
-                _activeDoc.PdfData = resultBytes;
-                _activeDoc.CleanPdfData = _pdfService.GetPdfBytesWithoutAnnotations(resultBytes);
-                MessageBox.Show("저장 완료!");
-            }
-            catch (Exception ex) { MessageBox.Show($"저장 실패: {ex.Message}"); }
-        }
-
-        private void BtnSaveAs_Click(object sender, RoutedEventArgs e)
-        {
-            if (_activeDoc == null || _activeDoc.PdfData == null) return;
-            var dlg = new SaveFileDialog { Filter = "PDF Files|*.pdf", FileName = "Copy_" + _activeDoc.FileName };
-            if (dlg.ShowDialog() == true)
-            {
-                try
-                {
-                    var allAnns = PrepareAnnotationsForSave();
-                    var resultBytes = _pdfService.SavePdfWithAnnotations(_activeDoc.PdfData, allAnns, 1.0);
-                    File.WriteAllBytes(dlg.FileName, resultBytes);
-                    MessageBox.Show("저장 완료!");
-                }
-                catch (Exception ex) { MessageBox.Show($"저장 실패: {ex.Message}"); }
-            }
-        }
     }
 }
