@@ -86,6 +86,7 @@ namespace SmartDocProcessor.WPF.Services
                     var page = doc.Pages[pageIndex - 1];
                     var content = ContentReader.ReadContent(page);
                     
+                    // .Point 제거 (이미 double) / page.Height는 .Point 사용
                     double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height.Point;
                     double yOffset = page.CropBox.Y1;
                     double xOffset = page.CropBox.X1;
@@ -414,7 +415,7 @@ namespace SmartDocProcessor.WPF.Services
 
         public byte[] DeletePage(byte[] pdfBytes, int pageIndex) { using (var ms = new MemoryStream(pdfBytes)) using (var outMs = new MemoryStream()) { var doc = PdfReader.Open(ms, PdfDocumentOpenMode.Import); var newDoc = new PdfDocument(); for (int i = 0; i < doc.PageCount; i++) if (i != pageIndex) newDoc.AddPage(doc.Pages[i]); newDoc.Save(outMs); return outMs.ToArray(); } }
 
-        // [수정] 반환 타입을 PdfDictionary로 변경 (internal class 에러 해결)
+        // [수정] 반환 타입 PdfDictionary로 변경하여 에러 해결
         private PdfDictionary? GetPdfForm(XForm form)
         {
             try { var prop = typeof(XForm).GetProperty("PdfForm", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public); if (prop != null) return prop.GetValue(form) as PdfDictionary; } catch { }
@@ -427,7 +428,6 @@ namespace SmartDocProcessor.WPF.Services
         public CustomPdfAnnotation(PdfDocument document) : base(document) { }
     }
     
-    // TextExtractionState는 PdfService 내부에서만 사용되므로 여기에 정의
     public class TextExtractionState
     {
         public XMatrix CTM { get; set; } = new XMatrix();
