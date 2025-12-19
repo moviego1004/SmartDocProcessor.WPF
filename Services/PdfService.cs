@@ -3,13 +3,16 @@ using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using System.Reflection;
+using System.Text.RegularExpressions; // [필수] Regex
+using System.Globalization; // [필수] CultureInfo, NumberStyles
+using System.Reflection; // [필수] BindingFlags
 using PdfSharp.Pdf;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf.IO;
-using PdfSharp.Fonts;
-using PdfSharp.Pdf.Annotations;
+using PdfSharp.Fonts; 
+using PdfSharp.Pdf.Annotations; 
 using PdfSharp.Pdf.AcroForms;
+using PdfSharp.Drawing.Layout; // [필수] XTextFormatter
 using PdfSharp.Pdf.Advanced;
 using PdfSharp.Pdf.Content;
 using PdfSharp.Pdf.Content.Objects;
@@ -29,59 +32,77 @@ namespace SmartDocProcessor.WPF.Services
         public double Height { get; set; }
         public int Page { get; set; }
         public string Color { get; set; } = "#000000";
-        public int FontSize { get; set; } = 14;
+        public int FontSize { get; set; } = 14; 
         public bool Selected { get; set; } = false;
         public string FontFamily { get; set; } = "Malgun Gothic";
         public bool IsBold { get; set; } = false;
     }
 
+    // 상태 추적 클래스 (내부 정의)
+    public class TextExtractionState
+    {
+        public TextState Current { get; set; } = new TextState();
+        private Stack<TextState> _stack = new Stack<TextState>();
+
+        public void Push() { _stack.Push(Current.Clone()); }
+        public void Pop() { if (_stack.Count > 0) Current = _stack.Pop(); }
+    }
+
+    public class TextState
+    {
+        public XMatrix CTM { get; set; } = new XMatrix(1, 0, 0, 1, 0, 0);
+        public XMatrix Tm { get; set; } = new XMatrix(1, 0, 0, 1, 0, 0);
+        public XMatrix Tlm { get; set; } = new XMatrix(1, 0, 0, 1, 0, 0);
+        public double FontSize { get; set; } = 10;
+
+        public TextState Clone()
+        {
+            return new TextState 
+            { 
+                CTM = this.CTM, 
+                Tm = this.Tm, 
+                Tlm = this.Tlm, 
+                FontSize = this.FontSize 
+            };
+        }
+    }
+
     public class PdfService
     {
-        public PdfService()
-        {
-            try
-            {
-                if (GlobalFontSettings.FontResolver == null)
-                    GlobalFontSettings.FontResolver = new SystemFontResolver();
-            }
-            catch { }
+        public PdfService() {
+            try { 
+                if (GlobalFontSettings.FontResolver == null) 
+                    GlobalFontSettings.FontResolver = new SystemFontResolver(); 
+            } catch { }
         }
 
         public bool IsPdfSearchable(byte[] pdfBytes)
         {
-            try
-            {
-                using (var inStream = new MemoryStream(pdfBytes))
-                {
+            try {
+                using (var inStream = new MemoryStream(pdfBytes)) {
                     var doc = PdfReader.Open(inStream, PdfDocumentOpenMode.Import);
                     int pagesToCheck = Math.Min(doc.PageCount, 3);
-                    for (int i = 0; i < pagesToCheck; i++)
-                    {
+                    for (int i = 0; i < pagesToCheck; i++) {
                         var content = ContentReader.ReadContent(doc.Pages[i]);
                         if (HasTextOperators(content)) return true;
                     }
                 }
-            }
-            catch { }
+            } catch { }
             return false;
         }
 
         private bool HasTextOperators(CObject content)
         {
-            if (content is COperator op)
-            {
+            if (content is COperator op) {
                 if (op.OpCode.Name == "Tj" || op.OpCode.Name == "TJ" || op.OpCode.Name == "\'") return true;
-                // [신규] XObject(폼) 내부도 검사
                 if (op.OpCode.Name == "Do") return true; 
-            }
-            else if (content is CSequence seq)
-            {
+            } else if (content is CSequence seq) {
                 foreach (var item in seq) if (HasTextOperators(item)) return true;
             }
             return false;
         }
 
-        // [핵심 기능] Chrome 방식의 텍스트 및 좌표 추출 (OCR 안함)
+        // [핵심] 텍스트 및 좌표 추출
         public List<TextData> ExtractTextFromPage(byte[] pdfBytes, int pageIndex)
         {
             var result = new List<TextData>();
@@ -94,20 +115,19 @@ namespace SmartDocProcessor.WPF.Services
 
                     var page = doc.Pages[pageIndex - 1];
                     
-                    // 페이지 기본 정보
-                    double pageHeight = page.CropBox.Height.Point > 0 ? page.CropBox.Height.Point : page.Height.Point;
-                    double xOffset = page.CropBox.X1.Point;
-                    double yOffset = page.CropBox.Y1.Point;
+                    // [수정] .Point 제거 (XUnit은 double로 자동 변환됨 or 이미 double임)
+                    // PdfSharp 최신 버전에서는 XUnit.Point 프로퍼티가 Obsolete일 수 있으므로 
+                    // 그냥 double로 받거나, 명시적 형변환을 사용. 여기선 안전하게 double로 간주.
+                    double pageHeight = page.CropBox.Height > 0 ? (double)page.CropBox.Height : (double)page.Height;
+                    double xOffset = (double)page.CropBox.X1;
+                    double yOffset = (double)page.CropBox.Y1;
 
-                    // 상태 초기화
                     var state = new TextExtractionState();
-                    state.CTM = new XMatrix(1, 0, 0, 1, 0, 0);
-                    state.Tm = new XMatrix(1, 0, 0, 1, 0, 0);
+                    // 초기값 설정
+                    state.Current.CTM = new XMatrix(1, 0, 0, 1, 0, 0); 
+                    state.Current.Tm = new XMatrix(1, 0, 0, 1, 0, 0);
 
-                    // Content 읽기
                     var content = ContentReader.ReadContent(page);
-                    
-                    // [중요] Resources(폰트, XObject 등) 정보 전달
                     ExtractTextRecursively(content, result, state, pageHeight, xOffset, yOffset, page.Resources);
                 }
             }
@@ -123,11 +143,8 @@ namespace SmartDocProcessor.WPF.Services
             }
             else if (content is COperator op)
             {
-                // 1. 그래픽 상태 저장/복원
                 if (op.OpCode.Name == "q") state.Push();
                 else if (op.OpCode.Name == "Q") state.Pop();
-
-                // 2. 좌표 변환 행렬 (cm)
                 else if (op.OpCode.Name == "cm")
                 {
                     if (op.Operands.Count >= 6)
@@ -140,41 +157,46 @@ namespace SmartDocProcessor.WPF.Services
                         state.Current.CTM.Prepend(mat);
                     }
                 }
-                
-                // [신규] 3. XObject (Form) 처리 - 텍스트가 여기 숨어있을 수 있음
                 else if (op.OpCode.Name == "Do")
                 {
                     if (op.Operands.Count > 0 && op.Operands[0] is CName xObjName && resources != null && resources.XObjects != null)
                     {
-                        var xObject = resources.XObjects[xObjName.Value];
-                        if (xObject is PdfFormXObject formXObj)
+                        var xObjectItem = resources.XObjects[xObjName.Value];
+                        if (xObjectItem is PdfReference refObj) xObjectItem = refObj.Value;
+
+                        if (xObjectItem is PdfDictionary xObjDict && xObjDict.Elements.GetString("/Subtype") == "/Form")
                         {
-                            // 폼 내부 컨텐츠 읽기
-                            var formContent = ContentReader.ReadContent(formXObj);
-                            var formResources = formXObj.Resources ?? resources; // 폼 리소스가 없으면 상위 리소스 사용
-                            
-                            // 상태 저장 후 재귀 호출
-                            state.Push();
-                            ExtractTextRecursively(formContent, result, state, pageHeight, xOffset, yOffset, formResources);
-                            state.Pop();
+                            try 
+                            {
+                                if (xObjDict.Stream != null)
+                                {
+                                    byte[] formBytes = xObjDict.Stream.UnfilteredValue;
+                                    var formContent = ContentReader.ReadContent(formBytes);
+                                    
+                                    var formResItem = xObjDict.Elements["/Resources"];
+                                    PdfResources formResources = resources; 
+                                    
+                                    if (formResItem is PdfReference resRef) formResItem = resRef.Value;
+                                    if (formResItem is PdfDictionary resDict) formResources = new PdfResources(resDict);
+
+                                    state.Push();
+                                    ExtractTextRecursively(formContent, result, state, pageHeight, xOffset, yOffset, formResources);
+                                    state.Pop();
+                                }
+                            }
+                            catch { }
                         }
                     }
                 }
-
-                // 4. 텍스트 객체 시작/종료
                 else if (op.OpCode.Name == "BT")
                 {
                     state.Current.Tm = new XMatrix(1, 0, 0, 1, 0, 0);
                     state.Current.Tlm = new XMatrix(1, 0, 0, 1, 0, 0);
                 }
-
-                // 5. 폰트 설정
                 else if (op.OpCode.Name == "Tf")
                 {
                     if (op.Operands.Count >= 2) state.Current.FontSize = GetOperandValue(op.Operands[1]);
                 }
-
-                // 6. 텍스트 매트릭스 (Tm)
                 else if (op.OpCode.Name == "Tm")
                 {
                     if (op.Operands.Count >= 6)
@@ -184,11 +206,24 @@ namespace SmartDocProcessor.WPF.Services
                             GetOperandValue(op.Operands[2]), GetOperandValue(op.Operands[3]),
                             GetOperandValue(op.Operands[4]), GetOperandValue(op.Operands[5])
                         );
-                        state.Current.Tlm = state.Current.Tm; // 라인 매트릭스도 업데이트
+                        state.Current.Tlm = state.Current.Tm;
                     }
                 }
-
-                // 7. 텍스트 그리기
+                else if (op.OpCode.Name == "Td" || op.OpCode.Name == "TD")
+                {
+                    if (op.Operands.Count >= 2)
+                    {
+                        double tx = GetOperandValue(op.Operands[0]);
+                        double ty = GetOperandValue(op.Operands[1]);
+                        state.Current.Tlm.TranslatePrepend(tx, ty);
+                        state.Current.Tm = state.Current.Tlm;
+                    }
+                }
+                else if (op.OpCode.Name == "T*")
+                {
+                    state.Current.Tlm.TranslatePrepend(0, -state.Current.FontSize * 1.2);
+                    state.Current.Tm = state.Current.Tlm;
+                }
                 else if (op.OpCode.Name == "Tj" || op.OpCode.Name == "\'")
                 {
                     if (op.Operands.Count > 0 && op.Operands[0] is CString cStr)
@@ -217,25 +252,19 @@ namespace SmartDocProcessor.WPF.Services
         {
             if (string.IsNullOrWhiteSpace(text)) return;
 
-            // 최종 매트릭스 = 텍스트매트릭스 * 변환매트릭스
             var mat = current.Tm * current.CTM;
-
             double pdfX = mat.OffsetX;
             double pdfY = mat.OffsetY;
 
-            // PDF(Bottom-Up) -> WPF(Top-Down) 변환
             double wpfX = pdfX - xOffset;
             double wpfY = (pageHeight - (pdfY - yOffset)) - current.FontSize;
 
-            // 스케일 계산
             double scaleY = Math.Sqrt(mat.M21 * mat.M21 + mat.M22 * mat.M22);
             double actualFontSize = current.FontSize * (scaleY == 0 ? 1 : scaleY);
 
-            // 너비 추정 (한글/영문 폭 고려하여 단순화)
-            double widthPerChar = actualFontSize * 0.6; // 대략적인 비율
+            double widthPerChar = actualFontSize * 0.6; 
             double estimatedWidth = text.Length * widthPerChar;
             
-            // DPI 보정 (72 -> 96)
             result.Add(new TextData
             {
                 Text = text,
@@ -246,7 +275,6 @@ namespace SmartDocProcessor.WPF.Services
             });
         }
 
-        // ... (나머지 저장/삭제 메서드는 기존 유지)
         public byte[] GetPdfBytesWithoutAnnotations(byte[] pdfBytes)
         {
             try {
@@ -269,9 +297,11 @@ namespace SmartDocProcessor.WPF.Services
                     for (int i = 0; i < doc.PageCount; i++) {
                         var page = doc.Pages[i];
                         int pageNum = i + 1;
-                        double pageHeight = page.CropBox.Height.Point > 0 ? page.CropBox.Height.Point : page.Height.Point;
-                        double yOffset = page.CropBox.Y1.Point;
-                        double xOffset = page.CropBox.X1.Point;
+                        
+                        // [수정] .Point 제거 및 명시적 캐스팅
+                        double pageHeight = page.CropBox.Height > 0 ? (double)page.CropBox.Height : (double)page.Height;
+                        double yOffset = (double)page.CropBox.Y1;
+                        double xOffset = (double)page.CropBox.X1;
 
                         if (page.Annotations != null) {
                             foreach (var item in page.Annotations) {
@@ -327,11 +357,12 @@ namespace SmartDocProcessor.WPF.Services
                     int pageIdx = group.Key - 1;
                     if (pageIdx < 0 || pageIdx >= doc.PageCount) continue;
                     var page = doc.Pages[pageIdx];
-                    double pageHeight = page.CropBox.Height.Point > 0 ? page.CropBox.Height.Point : page.Height.Point;
-                    double pageTop = page.CropBox.Height.Point > 0 ? (page.CropBox.Y1.Point + page.CropBox.Height.Point) : page.Height.Point;
-                    double xOffset = page.CropBox.X1.Point;
+                    
+                    // [수정] .Point 제거 및 명시적 캐스팅
+                    double pageHeight = page.CropBox.Height > 0 ? (double)page.CropBox.Height : (double)page.Height;
+                    double pageTop = page.CropBox.Height > 0 ? ((double)page.CropBox.Y1 + (double)page.CropBox.Height) : (double)page.Height;
+                    double xOffset = (double)page.CropBox.X1;
 
-                    // OCR 텍스트 저장
                     var ocrItems = group.Where(a => a.Type == "OCR_TEXT");
                     if (ocrItems.Any())
                     {
@@ -346,7 +377,6 @@ namespace SmartDocProcessor.WPF.Services
                         }
                     }
 
-                    // 사용자 주석
                     foreach (var ann in group.Where(a => a.Type != "OCR_TEXT"))
                     {
                         double scaledX = ann.X * 0.75; double scaledY = ann.Y * 0.75;
@@ -364,7 +394,6 @@ namespace SmartDocProcessor.WPF.Services
                             try { string hex=ann.Color.Replace("#",""); if(hex.Length==8) c=XColor.FromArgb(int.Parse(hex.Substring(0,2),NumberStyles.HexNumber), int.Parse(hex.Substring(2,2),NumberStyles.HexNumber), int.Parse(hex.Substring(4,2),NumberStyles.HexNumber), int.Parse(hex.Substring(6,2),NumberStyles.HexNumber)); } catch{}
                             double r=c.R/255.0; double g=c.G/255.0; double b=c.B/255.0; double pdfFontSize=ann.FontSize*0.75;
                             annot.Elements["/DA"] = new PdfString($"/Helv {pdfFontSize:0.##} Tf {r.ToString("0.###", CultureInfo.InvariantCulture)} {g.ToString("0.###", CultureInfo.InvariantCulture)} {b.ToString("0.###", CultureInfo.InvariantCulture)} rg");
-                            
                             var formRect = new XRect(0, 0, scaledW, scaledH);
                             var form = new XForm(doc, formRect);
                             using (var gfx = XGraphics.FromForm(form)) {
@@ -411,27 +440,4 @@ namespace SmartDocProcessor.WPF.Services
     }
 
     public class CustomPdfAnnotation : PdfAnnotation { public CustomPdfAnnotation(PdfDocument document) : base(document) { } }
-
-    // [신규] 상태 추적용 클래스
-    public class TextExtractionState
-    {
-        public TextState Current { get; set; } = new TextState();
-        private Stack<TextState> _stack = new Stack<TextState>();
-
-        public void Push() { _stack.Push(Current.Clone()); }
-        public void Pop() { if (_stack.Count > 0) Current = _stack.Pop(); }
-    }
-
-    public class TextState
-    {
-        public XMatrix CTM { get; set; } = new XMatrix(1, 0, 0, 1, 0, 0);
-        public XMatrix Tm { get; set; } = new XMatrix(1, 0, 0, 1, 0, 0);
-        public XMatrix Tlm { get; set; } = new XMatrix(1, 0, 0, 1, 0, 0);
-        public double FontSize { get; set; } = 10;
-
-        public TextState Clone()
-        {
-            return new TextState { CTM = this.CTM, Tm = this.Tm, Tlm = this.Tlm, FontSize = this.FontSize };
-        }
-    }
 }
