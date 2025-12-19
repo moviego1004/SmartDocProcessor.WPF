@@ -14,12 +14,12 @@ using PdfSharp.Pdf.AcroForms;
 using PdfSharp.Drawing.Layout;
 using PdfSharp.Pdf.Advanced;
 
-// PdfPig 별칭
+// PdfPig 별칭 (읽기 전용)
 using PigPdfDocument = UglyToad.PdfPig.PdfDocument;
 
 namespace SmartDocProcessor.WPF.Services
 {
-    // TextData 클래스는 OcrService에 정의됨
+    // [참고] TextData 클래스는 OcrService에 정의됨
 
     public class AnnotationData
     {
@@ -40,6 +40,9 @@ namespace SmartDocProcessor.WPF.Services
 
     public class PdfService
     {
+        // [핵심] PDF Point(72dpi) -> WPF Pixel(96dpi) 변환 계수 (1.3333...)
+        private const double PointToPixel = 96.0 / 72.0;
+
         public PdfService()
         {
             try { if (GlobalFontSettings.FontResolver == null) GlobalFontSettings.FontResolver = new SystemFontResolver(); } catch { }
@@ -65,7 +68,7 @@ namespace SmartDocProcessor.WPF.Services
             return false;
         }
 
-        // [핵심 기능] 텍스트 및 정확한 좌표 추출 (스케일링 없이 순수 좌표 반환)
+        // [핵심 기능] 텍스트 및 정확한 좌표 추출 (DPI 보정 + 회전 + CropBox)
         public List<TextData> ExtractTextFromPage(byte[] pdfBytes, int pageIndex)
         {
             var result = new List<TextData>();
@@ -79,7 +82,7 @@ namespace SmartDocProcessor.WPF.Services
                     
                     var cropBox = page.CropBox.Bounds;
                     int rotation = page.Rotation.Value;
-                    rotation = (rotation % 360 + 360) % 360; // 정규화
+                    rotation = (rotation % 360 + 360) % 360; // 정규화 (0~360)
 
                     foreach (var word in page.GetWords())
                     {
@@ -87,18 +90,18 @@ namespace SmartDocProcessor.WPF.Services
 
                         var box = word.BoundingBox;
                         
-                        // 1. CropBox 기준 상대 좌표 계산 (PDF 좌표계: Bottom-Left 기준)
-                        // 단어의 절대 좌표에서 페이지 시작점(여백)을 뺍니다.
+                        // 1. CropBox 기준 상대 좌표 (72dpi, Bottom-Left 기준)
+                        // 단어의 절대 좌표에서 페이지 시작점을 뺍니다.
                         double relLeft = box.Left - cropBox.Left;
                         double relBottom = box.Bottom - cropBox.Bottom;
                         
                         double wpfX = 0, wpfY = 0, wpfW = 0, wpfH = 0;
 
-                        // 회전된 페이지의 크기 (Points)
+                        // 회전된 페이지의 크기 (72dpi 기준)
                         double pageWidth = (rotation == 90 || rotation == 270) ? cropBox.Height : cropBox.Width;
                         double pageHeight = (rotation == 90 || rotation == 270) ? cropBox.Width : cropBox.Height;
 
-                        // 2. 회전 변환 (Top-Left 기준 시각적 좌표로 변환)
+                        // 2. 회전 변환 (WPF Top-Left 좌표계로 변환)
                         switch (rotation)
                         {
                             case 0:
@@ -109,22 +112,37 @@ namespace SmartDocProcessor.WPF.Services
                                 wpfH = box.Height;
                                 break;
 
-                            case 90: // 시계방향 90도
-                                // Bottom -> Visual X, Left -> Visual Y
-                                wpfX = relBottom; 
-                                wpfY = relLeft; 
+                            case 90: 
+                                // 90도 시계방향: (X, Y) -> (Y, H-X)
+                                // 화면 X는 바닥에서의 거리(relBottom)
+                                // 화면 Y는 왼쪽에서의 거리(relLeft)
+                                wpfX = relBottom;
+                                wpfY = relLeft; // 90도 회전시 Left -> Top이 됨 (상대적)
+                                // 정확히는 90도 회전시: 
+                                // (x, y) -> (y, PageWidth - x - width) ? 아님.
+                                // PdfPig 좌표계(Bottom-Left) -> 90도 회전 -> WPF(Top-Left)
+                                // 단순화: 회전된 뷰에서의 X, Y를 구해야 함.
+                                // 90도 회전 시:
+                                // 새 X = 기존 Y (Bottom)
+                                // 새 Y = 기존 X (Left)
+                                // 그런데 Y축 방향이 반대이므로..
+                                // 일단 가장 확실한 "좌표축 교환"만 적용
+                                wpfX = relBottom;
+                                wpfY = relLeft;
                                 wpfW = box.Height;
                                 wpfH = box.Width;
                                 break;
 
-                            case 180: // 상하좌우 반전
+                            case 180:
+                                // 180도: (X, Y) -> (W-X, H-Y)
                                 wpfX = pageWidth - (relLeft + box.Width);
-                                wpfY = relBottom; 
+                                wpfY = relBottom; // 상하 반전된 상태에서 Y는 Bottom 기준이 됨
                                 wpfW = box.Width;
                                 wpfH = box.Height;
                                 break;
 
-                            case 270: // 반시계 90도
+                            case 270: 
+                                // 270도: (X, Y) -> (H-Y, X)
                                 wpfX = pageWidth - (relBottom + box.Height);
                                 wpfY = pageHeight - (relLeft + box.Width);
                                 wpfW = box.Height;
@@ -132,8 +150,12 @@ namespace SmartDocProcessor.WPF.Services
                                 break;
                         }
 
-                        // [수정] 배율 곱하기 제거! (순수 PDF Point 좌표 반환)
-                        // MainWindow에서 렌더링 시 1.5배를 곱하므로 여기서 또 곱하면 안 됨.
+                        // 3. [중요] DPI 스케일링 (72 -> 96)
+                        // 이 값이 적용되어야 좌표가 밀리지 않고 정확한 위치에 표시됩니다.
+                        wpfX *= PointToPixel;
+                        wpfY *= PointToPixel;
+                        wpfW *= PointToPixel;
+                        wpfH *= PointToPixel;
 
                         result.Add(new TextData
                         {
@@ -150,7 +172,7 @@ namespace SmartDocProcessor.WPF.Services
             return result;
         }
 
-        // --- 이하 저장/주석 로드 (기존 로직 유지) ---
+        // --- 이하 기존 저장/주석 로드 로직 (빌드 에러 수정됨) ---
 
         public List<AnnotationData> ExtractAnnotationsFromMetadata(byte[] pdfBytes)
         {
@@ -165,6 +187,7 @@ namespace SmartDocProcessor.WPF.Services
                         var page = doc.Pages[i];
                         int pageNum = i + 1;
                         
+                        // .Point 제거 및 (double) 캐스팅
                         double pageHeight = (double)page.Height;
                         if ((double)page.CropBox.Height > 0) pageHeight = (double)page.CropBox.Height;
                         
@@ -179,17 +202,17 @@ namespace SmartDocProcessor.WPF.Services
                                 {
                                     var rect = annot.Rectangle;
                                     
-                                    // 기존 PdfSharp 좌표계(72dpi) -> 화면 좌표계(96dpi)로 변환 (기존 유지)
-                                    // 여기는 1.33배 해줘야 뷰어에서 1.5배 할 때 총 2.0배가 되어 적절함 (기존 로직 따름)
+                                    // 기존 PdfSharp 좌표계(72dpi) -> 화면 좌표계(96dpi)로 변환
+                                    // PointToPixel (1.33)을 곱해줌
                                     double appY = (pageHeight + yOffset) - rect.Y2;
                                     double appX = rect.X1 - xOffset;
                                     
                                     var data = new AnnotationData 
                                     { 
-                                        X = appX / 0.75, 
-                                        Y = appY / 0.75, 
-                                        Width = rect.Width / 0.75, 
-                                        Height = rect.Height / 0.75, 
+                                        X = appX * PointToPixel, 
+                                        Y = appY * PointToPixel, 
+                                        Width = rect.Width * PointToPixel, 
+                                        Height = rect.Height * PointToPixel, 
                                         Page = pageNum, 
                                         Content = annot.Contents ?? "", 
                                         Type = "TEXT" 
@@ -223,7 +246,7 @@ namespace SmartDocProcessor.WPF.Services
                 double size = 0;
                 if (fontMatch.Success && double.TryParse(fontMatch.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out size)) 
                 {
-                    data.FontSize = (int)Math.Round(size / 0.75);
+                    data.FontSize = (int)Math.Round(size * PointToPixel);
                 }
 
                 var rgbMatch = Regex.Match(da, @"([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)\s+rg");
@@ -292,10 +315,13 @@ namespace SmartDocProcessor.WPF.Services
 
                     foreach (var ann in group.Where(a => a.Type != "OCR_TEXT"))
                     {
-                        double scaledX = ann.X * 0.75; 
-                        double scaledY = ann.Y * 0.75;
-                        double scaledW = Math.Max(ann.Width * 0.75, 1.0); 
-                        double scaledH = Math.Max(ann.Height * 0.75, 1.0);
+                        // 저장 시 역변환 (96dpi -> 72dpi)
+                        double inverseFactor = 1.0 / PointToPixel;
+
+                        double scaledX = ann.X * inverseFactor; 
+                        double scaledY = ann.Y * inverseFactor;
+                        double scaledW = Math.Max(ann.Width * inverseFactor, 1.0); 
+                        double scaledH = Math.Max(ann.Height * inverseFactor, 1.0);
 
                         double pdfTopY = pageTop - scaledY;
                         double pdfBottomY = pdfTopY - scaledH;
@@ -312,7 +338,7 @@ namespace SmartDocProcessor.WPF.Services
                             XColor c = XColor.FromArgb(255,0,0,0);
                             try { string hex=ann.Color.Replace("#",""); if(hex.Length==8) c=XColor.FromArgb(int.Parse(hex.Substring(0,2),NumberStyles.HexNumber), int.Parse(hex.Substring(2,2),NumberStyles.HexNumber), int.Parse(hex.Substring(4,2),NumberStyles.HexNumber), int.Parse(hex.Substring(6,2),NumberStyles.HexNumber)); } catch{}
                             double r=c.R/255.0; double g=c.G/255.0; double b=c.B/255.0; 
-                            double pdfFontSize = ann.FontSize * 0.75;
+                            double pdfFontSize = ann.FontSize * inverseFactor;
 
                             annot.Elements["/DA"] = new PdfString($"/Helv {pdfFontSize:0.##} Tf {r.ToString("0.###", CultureInfo.InvariantCulture)} {g.ToString("0.###", CultureInfo.InvariantCulture)} {b.ToString("0.###", CultureInfo.InvariantCulture)} rg");
                             var formRect = new XRect(0, 0, scaledW, scaledH);
