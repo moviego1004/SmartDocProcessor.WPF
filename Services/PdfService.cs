@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Reflection; 
 using System.Text.RegularExpressions;
 using System.Globalization; 
+using System.Text; // StringBuilder
 using PdfSharp.Pdf;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf.IO;
@@ -19,6 +20,16 @@ using PdfSharp.Pdf.Content.Objects;
 
 namespace SmartDocProcessor.WPF.Services
 {
+    // 텍스트 추출 데이터용 클래스
+    public class TextData
+    {
+        public string Text { get; set; } = "";
+        public double X { get; set; }
+        public double Y { get; set; }
+        public double Width { get; set; }
+        public double Height { get; set; }
+    }
+
     public class AnnotationData
     {
         public string Id { get; set; } = Guid.NewGuid().ToString();
@@ -70,6 +81,59 @@ namespace SmartDocProcessor.WPF.Services
             return false;
         }
 
+        // [신규] Searchable PDF에서 텍스트 추출 (좌표 포함)
+        public List<TextData> ExtractTextFromPage(byte[] pdfBytes, int pageIndex)
+        {
+            var result = new List<TextData>();
+            try
+            {
+                using (var inStream = new MemoryStream(pdfBytes))
+                {
+                    var doc = PdfReader.Open(inStream, PdfDocumentOpenMode.Import);
+                    if (pageIndex < 1 || pageIndex > doc.PageCount) return result;
+
+                    var page = doc.Pages[pageIndex - 1];
+                    var content = ContentReader.ReadContent(page);
+                    
+                    // 간단한 텍스트 추출 (좌표는 추정치 사용)
+                    // PDFSharp은 텍스트 추출 전용 라이브러리가 아니라서 좌표가 정확하지 않을 수 있음.
+                    // 실제 상용급에서는 PDFium이나 iText를 써야 하지만, 여기서는 기본 기능으로 구현.
+                    ExtractTextRecursively(content, result, page);
+                }
+            }
+            catch { }
+            return result;
+        }
+
+        private void ExtractTextRecursively(CObject content, List<TextData> result, PdfPage page)
+        {
+            if (content is CSequence seq)
+            {
+                foreach (var item in seq) ExtractTextRecursively(item, result, page);
+            }
+            else if (content is COperator op)
+            {
+                if (op.OpCode.Name == "Tj" || op.OpCode.Name == "\'")
+                {
+                    if (op.Operands.Count > 0 && op.Operands[0] is CString cStr)
+                    {
+                        // 좌표를 정확히 알기 어려우므로 페이지 전체 텍스트로 간주하거나 임의 처리
+                        // 여기서는 검색 가능성만 열어두기 위해 더미 좌표 사용 (필요시 개선)
+                        result.Add(new TextData { Text = cStr.Value, X = 0, Y = 0, Width = 0, Height = 0 });
+                    }
+                }
+                else if (op.OpCode.Name == "TJ")
+                {
+                    if (op.Operands.Count > 0 && op.Operands[0] is CArray arr)
+                    {
+                        var sb = new StringBuilder();
+                        foreach (var item in arr) if (item is CString s) sb.Append(s.Value);
+                        result.Add(new TextData { Text = sb.ToString(), X = 0, Y = 0, Width = 0, Height = 0 });
+                    }
+                }
+            }
+        }
+
         public byte[] GetPdfBytesWithoutAnnotations(byte[] pdfBytes)
         {
             try {
@@ -93,7 +157,6 @@ namespace SmartDocProcessor.WPF.Services
                         var page = doc.Pages[i];
                         int pageNum = i + 1;
                         
-                        // [수정] .Point 제거 (타입 에러 수정)
                         double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height;
                         double yOffset = page.CropBox.Y1;
                         double xOffset = page.CropBox.X1;
@@ -104,11 +167,9 @@ namespace SmartDocProcessor.WPF.Services
                                     var subType = annot.Elements.GetString("/Subtype");
                                     var rect = annot.Rectangle;
                                     
-                                    // PDF(Bottom-Up) -> WPF(Top-Down)
                                     double appY = (pageHeight + yOffset) - rect.Y2;
                                     double appX = rect.X1 - xOffset;
 
-                                    // DPI 변환 (72 -> 96)
                                     double scaledX = appX / 0.75;
                                     double scaledY = appY / 0.75;
                                     double scaledW = rect.Width / 0.75;
@@ -170,12 +231,10 @@ namespace SmartDocProcessor.WPF.Services
                     if (pageIdx < 0 || pageIdx >= doc.PageCount) continue;
                     var page = doc.Pages[pageIdx];
                     
-                    // [수정] .Point 제거 (타입 에러 수정)
                     double pageHeight = page.CropBox.Height > 0 ? page.CropBox.Height : page.Height;
                     double pageTop = page.CropBox.Height > 0 ? (page.CropBox.Y1 + page.CropBox.Height) : page.Height;
                     double xOffset = page.CropBox.X1;
 
-                    // 1. OCR 텍스트 저장
                     var ocrItems = group.Where(a => a.Type == "OCR_TEXT");
                     if (ocrItems.Any())
                     {
@@ -183,14 +242,13 @@ namespace SmartDocProcessor.WPF.Services
                         {
                             foreach (var ann in ocrItems)
                             {
-                                var brush = new XSolidBrush(XColor.FromArgb(1, 0, 0, 0)); // 투명
+                                var brush = new XSolidBrush(XColor.FromArgb(1, 0, 0, 0));
                                 var font = new XFont("Arial", 10, XFontStyleEx.Regular);
                                 gfx.DrawString(ann.Content, font, brush, new XRect(ann.X, ann.Y, ann.Width, ann.Height), XStringFormats.TopLeft);
                             }
                         }
                     }
 
-                    // 2. 사용자 주석 저장
                     foreach (var ann in group.Where(a => a.Type != "OCR_TEXT"))
                     {
                         double scaledX = ann.X * 0.75;
